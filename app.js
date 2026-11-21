@@ -5,6 +5,7 @@
   const $ = id => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const TEST = params.has('test');
+  const VER = window.TASMI_V || '';
   const HF = 'https://huggingface.co/Hisnlabs/tajweed-v2/resolve/main/onnx/';
   const MODEL_URL = params.get('model') || HF + 'model-int8.onnx';
   // the browser runtime can't run the int8 model's ConvInteger layers: fall back to the full-precision export
@@ -24,7 +25,7 @@
 
   // ---------- model ----------
   function initModel() {
-    worker = new Worker('hear-worker.js');
+    worker = new Worker('hear-worker.js?v=' + VER);
     worker.onmessage = e => {
       const m = e.data;
       if (m.type === 'progress') {
@@ -56,31 +57,90 @@
   // ---------- passage ----------
   async function loadSurah(n) {
     if (!loadSurah.cache) loadSurah.cache = {};
-    if (!loadSurah.cache[n]) loadSurah.cache[n] = await (await fetch(`data/${n}.json`)).json();
+    if (!loadSurah.cache[n]) loadSurah.cache[n] = await (await fetch(`data/${n}.json?v=${VER}`)).json();
     return loadSurah.cache[n];
   }
+  // ---------- choosing what to recite: safha, ruba, nisf, para, one ayah, or an ayah range ----------
+  let DIV = null, START = [], unitLabel = '';
+  const idOf = (sn, an) => START[sn] + an - 1;                    // global ayah number 1..6236
+  function sa(id) { let s = 1; while (s < 114 && START[s + 1] <= id) s++; return [s, id - START[s] + 1]; }
+  const ayahRef = (sn, an) => `${sn}:${an}`;
+  function showSel() {
+    const u = $('unit').value;
+    document.querySelectorAll('#sel [data-u]').forEach(l => { l.style.display = l.dataset.u.split(' ').includes(u) ? '' : 'none'; });
+  }
+  function clampInputs() {
+    const u = $('unit').value, cl = (el, lo, hi) => { el.value = Math.max(lo, Math.min(hi, Math.round(+el.value || lo))); return +el.value; };
+    cl($('page'), 1, 604); cl($('para'), 1, 30);
+    const n = SURAHS[+$('surah').value - 1][3];
+    cl($('ayah'), 1, n); const f = cl($('from'), 1, n); $('to').value = Math.max(f, Math.min(n, +$('to').value || n));
+    return u;
+  }
+  /** [first, last] global ayah ids of the chosen unit, and a label for it */
+  function chosen() {
+    const u = clampInputs(), j = +$('para').value, sn = +$('surah').value;
+    if (u === 'page') return { r: DIV.page[+$('page').value - 1], label: 'Safha ' + $('page').value };
+    if (u === 'juz') return { r: DIV.juz[j - 1], label: 'Para ' + j };
+    if (u === 'ruba') { const q = (j - 1) * 8 + (+$('ruba').value - 1) * 2; return { r: [DIV.rub[q][0], DIV.rub[q + 1][1]], label: `Para ${j}, ruba ${$('ruba').value}` }; }
+    if (u === 'nisf') { const q = (j - 1) * 8 + (+$('nisf').value - 1) * 4; return { r: [DIV.rub[q][0], DIV.rub[q + 3][1]], label: `Para ${j}, nisf ${$('nisf').value}` }; }
+    if (u === 'ayah') { const id = idOf(sn, +$('ayah').value); return { r: [id, id], label: 'Ayah' }; }
+    return { r: [idOf(sn, +$('from').value), idOf(sn, +$('to').value)], label: SURAHS[sn - 1][2] };
+  }
+  function step(d) {
+    const u = $('unit').value;
+    if (u === 'page') $('page').value = +$('page').value + d;
+    else if (u === 'juz') $('para').value = +$('para').value + d;
+    else if (u === 'ruba' || u === 'nisf') {
+      const el = $(u), n = u === 'ruba' ? 4 : 2; let k = +el.value + d, j = +$('para').value;
+      if (k > n) { k = 1; j++; } if (k < 1) { k = n; j--; }
+      if (j >= 1 && j <= 30) { el.value = k; $('para').value = j; }
+    } else {
+      const sn = +$('surah').value, cur = chosen().r, len = cur[1] - cur[0] + 1;
+      const id = d > 0 ? cur[1] + 1 : cur[0] - len;
+      if (id < 1 || id > 6236) return;
+      const [s2, a2] = sa(id); $('surah').value = s2;
+      if (u === 'ayah') $('ayah').value = a2;
+      else { const n = SURAHS[s2 - 1][3]; $('from').value = a2; $('to').value = Math.min(n, a2 + len - 1); }
+      if (s2 !== sn && u === 'range') { /* moved into the next surah */ }
+    }
+    build();
+  }
   async function build() {
-    sn = +$('surah').value;
-    const info = SURAHS[sn - 1];
-    let a = Math.max(1, Math.min(info[3], +$('from').value || 1));
-    let b = Math.max(a, Math.min(info[3], +$('to').value || info[3]));
-    $('from').value = a; $('to').value = b;
-    lsSet('emuhaffiz.last', { s: sn, a, b });
-    S = await loadSurah(sn);
+    showSel();
+    const { r: [f, l], label } = chosen();
+    const [s0, a0] = sa(f), [s1, a1] = sa(l);
+    unitLabel = `${label} · ${SURAHS[s0 - 1][2]} ${ayahRef(s0, a0)}` + (f !== l ? ` – ${s1 !== s0 ? SURAHS[s1 - 1][2] + ' ' : ''}${ayahRef(s1, a1)}` : '');
+    $('unitDesc').textContent = unitLabel;
+    lsSet('tasmi.sel', { unit: $('unit').value, page: $('page').value, para: $('para').value, ruba: $('ruba').value, nisf: $('nisf').value,
+      surah: $('surah').value, ayah: $('ayah').value, from: $('from').value, to: $('to').value });
+    const token = (build.token = (build.token || 0) + 1);
+    // the passage may run across surahs (a page often does): one list of ayat, each knowing its surah and number
+    const ayat = [];
+    for (let sn = s0; sn <= s1; sn++) {
+      const data = await loadSurah(sn);
+      const from = sn === s0 ? a0 : 1, to = sn === s1 ? a1 : data.length;
+      for (let an = from; an <= to; an++) ayat.push({ ...data[an - 1], sn, an });
+    }
+    if (token !== build.token) return;          // a newer choice was made while loading
+    S = ayat; sn = s0;
     passage = [];
-    for (let ai = a - 1; ai < b; ai++) S[ai].w.forEach((_, k) => passage.push([ai, k]));
+    S.forEach((a, ai) => a.w.forEach((_, k) => passage.push([ai, k])));
     const box = $('mushaf'); box.innerHTML = ''; spans = [];
     const frag = document.createDocumentFragment();
     passage.forEach(([ai, k], i) => {
+      if (k === 0 && S[ai].an === 1) {
+        const h = document.createElement('span'); h.className = 'sh'; h.textContent = 'سورة ' + SURAHS[S[ai].sn - 1][1];
+        frag.appendChild(h);
+      }
       const sp = document.createElement('span'); sp.className = 'w p'; sp.textContent = disp(ai, k); sp.dataset.i = i;
       spans.push(sp); frag.appendChild(sp); frag.appendChild(document.createTextNode(' '));
       if (k === S[ai].w.length - 1) {
-        const am = document.createElement('span'); am.className = 'am'; am.textContent = (ai + 1).toLocaleString('ar-EG');
+        const am = document.createElement('span'); am.className = 'am'; am.textContent = S[ai].an.toLocaleString('ar-EG');
         frag.appendChild(am); frag.appendChild(document.createTextNode(' '));
       }
     });
     box.appendChild(frag);
-    reset();
+    reset(); setMain();
   }
   function reset() {
     W = passage.map(() => ({ st: 'p', notes: [], madd: [], everJali: false, tries: 0 }));
@@ -122,6 +182,7 @@
     const refPh = Engine.phonemesOf(S, passage.slice(loc.a, loc.b));
     const ratio = loc.cost / Math.max(refPh.length, h.text.length);
     Object.assign(entry, { a: loc.a, b: loc.b, cost: +loc.cost.toFixed(1), ratio: +ratio.toFixed(2), expected: refPh });
+    if (ratio > 0.55 && isPreamble(h.text)) { entry.skip = 'basmala / isti\'adha'; return addLog(entry); }
     if (ratio > 0.55) {
       entry.skip = 'not this passage (isti\'adha, basmala, or another ayah?)';
       addLog(entry);
@@ -153,6 +214,18 @@
     render();
   }
 
+  // basmala and isti'adha are recited before a surah / a session: recognise them so they are not taken for mistakes
+  let PREAMBLE = [];
+  async function preambles() {
+    const f = await loadSurah(1);
+    return [Engine.phonemesOf(f, f[0].w.map((_, k) => [0, k])), 'ءَعُوذُبِللَااهِمِنَششَيطَاانِررَجِۦۦۦۦم'];
+  }
+  function isPreamble(t) {
+    t = t.replace(/ /g, '');
+    return PREAMBLE.some(p => Engine.distance(p, t) / Math.max(p.length, t.length) < 0.35 ||
+      (t.length > p.length && Engine.distance(p, t.slice(0, p.length)) / p.length < 0.3 && t.length - p.length < 12));
+  }
+
   // ---------- the muhaffiz stops you ----------
   const speakable = t => t.replace(/[ۖ-ۭ]/g, '').replace(/ٱ/g, 'ا');
   function showStop(i, r, breathEnd) {
@@ -162,7 +235,7 @@
     $('stopCard').className = 'show' + (jali ? '' : ' kh');
     document.body.classList.add('stopped');
     requestAnimationFrame(() => { const sp = spans[i]; if (sp) { const r = sp.getBoundingClientRect(); window.scrollBy({ top: r.top - 120, behavior: 'smooth' }); } });
-    $('scTitle').textContent = (missing ? 'You skipped' : jali ? 'Mistake' : 'Tajweed') + ' · ayah ' + (passage[i][0] + 1);
+    $('scTitle').textContent = (missing ? 'You skipped' : jali ? 'Mistake' : 'Tajweed') + ' · ayah ' + ayahRef(S[passage[i][0]].sn, S[passage[i][0]].an);
     $('scWord').textContent = disp(passage[i][0], passage[i][1]);
     $('scWhy').innerHTML = r.notes.slice(0, 3).map(n => `<div>${esc(n.msg.en)}</div><div class="ar">${esc(n.msg.ar)}</div>`).join('');
     $('scRight').style.display = missing ? 'none' : '';
@@ -243,16 +316,15 @@
   function finish() {
     if (listening) stopListening();
     hideStop();
-    const info = SURAHS[sn - 1];
     const c = { ok: 0, kh: 0, jali: 0, fixed: 0 };
     W.forEach(w => { if (w.st in c) c[w.st]++; });
     const mistakes = W.filter(w => w.everJali).length;
-    $('sRange').textContent = `${info[2]} (${info[1]}) · ayah ${$('from').value}–${$('to').value}`;
+    $('sRange').textContent = unitLabel;
     $('sBig').innerHTML = `<div><b>${c.ok}</b>Correct</div><div><b>${mistakes}</b>Mistakes</div><div><b>${c.fixed}</b>Fixed</div><div><b>${c.kh}</b>Tajweed</div>`;
     const byAyah = new Map();
     W.forEach((w, i) => {
       if (!(w.everJali || w.st === 'kh' || w.st === 'jali')) return;
-      const a = passage[i][0] + 1; if (!byAyah.has(a)) byAyah.set(a, []);
+      const a = ayahRef(S[passage[i][0]].sn, S[passage[i][0]].an); if (!byAyah.has(a)) byAyah.set(a, []);
       const n = (w.notes.length ? w.notes : w.lastNotes || []).map(x => x.msg.en).join('; ');
       byAyah.get(a).push(`<span class="qw">${esc(wordName(i))}</span> — ${esc(n || (w.st === 'fixed' ? 'fixed after correction' : 'mistake'))}`);
     });
@@ -260,14 +332,14 @@
     $('sRev').innerHTML = (byAyah.size ? '<b>Revise:</b><ul>' + [...byAyah].map(([a, l]) => `<li>Ayah ${a}<ul>${l.map(x => `<li>${x}</li>`).join('')}</ul></li>`).join('') + '</ul>' : '<b>MashaAllah — no remarks.</b>') +
       (unread ? `<p class="sub" style="text-align:left">${unread} words not recited yet.</p>` : '');
     const hist = lsGet('emuhaffiz.hist', []);
-    hist.unshift({ d: new Date().toISOString().slice(0, 16).replace('T', ' '), s: info[2], a: $('from').value, b: $('to').value, ...c, m: mistakes });
+    hist.unshift({ d: new Date().toISOString().slice(0, 16).replace('T', ' '), label: unitLabel, ...c, m: mistakes });
     lsSet('emuhaffiz.hist', hist.slice(0, 40)); showHist();
     $('sumDlg').showModal();
   }
   function showHist() {
     const h = lsGet('emuhaffiz.hist', []);
     $('histBox').style.display = h.length ? '' : 'none';
-    $('hist').innerHTML = h.map(x => `<li>${esc(x.d)} — ${esc(x.s)} ${x.a}–${x.b}: ${x.ok} correct, ${x.m ?? x.jali} mistakes, ${x.kh} tajweed remarks</li>`).join('');
+    $('hist').innerHTML = h.map(x => `<li>${esc(x.d)} — ${esc(x.label || (x.s + ' ' + x.a + '–' + x.b))}: ${x.ok} correct, ${x.m ?? x.jali} mistakes, ${x.kh} tajweed remarks</li>`).join('');
   }
 
   // ---------- controls ----------
@@ -312,9 +384,10 @@
     const saved = lsGet('emuhaffiz.' + id, null); if (saved !== null) $(id).checked = saved;
     $(id).addEventListener('change', () => { lsSet('emuhaffiz.' + id, $(id).checked); render(); });
   });
-  $('surah').addEventListener('change', () => { $('from').value = 1; $('to').value = SURAHS[+$('surah').value - 1][3]; build(); });
-  $('from').addEventListener('change', build);
-  $('to').addEventListener('change', build);
+  $('surah').addEventListener('change', () => { $('from').value = 1; $('ayah').value = 1; $('to').value = SURAHS[+$('surah').value - 1][3]; build(); });
+  ['unit', 'page', 'para', 'ruba', 'nisf', 'ayah', 'from', 'to'].forEach(id => $(id).addEventListener('change', build));
+  $('prevU').addEventListener('click', () => step(-1));
+  $('nextU').addEventListener('click', () => step(1));
   $('copyLog').addEventListener('click', () => {
     const txt = JSON.stringify({ surah: sn, from: $('from').value, to: $('to').value, ua: navigator.userAgent, log }, null, 1);
     navigator.clipboard.writeText(txt).then(() => toastNote('Log copied. Paste it to Claude.'), () => toastNote('Could not copy.'));
@@ -322,10 +395,13 @@
 
   // ---------- start ----------
   (async () => {
-    [SURAHS, vocab] = await Promise.all([fetch('surahs.json').then(r => r.json()), fetch('vocab.json').then(r => r.json()).then(v => v.phonemes)]);
+    [SURAHS, vocab, DIV] = await Promise.all([fetch('surahs.json?v=' + VER).then(r => r.json()),
+      fetch('vocab.json?v=' + VER).then(r => r.json()).then(v => v.phonemes), fetch('divisions.json?v=' + VER).then(r => r.json())]);
+    START = [0, 1]; for (let n = 1; n < 114; n++) START.push(START[n] + SURAHS[n - 1][3]);
     $('surah').innerHTML = SURAHS.map(s => `<option value="${s[0]}">${s[0]}. ${s[2]} · ${s[1]}</option>`).join('');
-    const last = lsGet('emuhaffiz.last', null);
-    if (last && SURAHS[last.s - 1]) { $('surah').value = last.s; $('from').value = last.a; $('to').value = last.b; }
+    const sel = lsGet('tasmi.sel', null);
+    if (sel) for (const [k, v] of Object.entries(sel)) if ($(k) && v != null) $(k).value = v;
+    PREAMBLE = await preambles();
     await build(); showHist(); setMain(); status();
     if (!TEST || params.get('model')) initModel();
     if (TEST) window.__app = { get pos() { return pos; }, get W() { return W; }, get passage() { return passage; }, get stop() { return stop; },

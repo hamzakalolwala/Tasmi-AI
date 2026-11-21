@@ -1,5 +1,6 @@
 /* Runs the tajweed model off the main thread: audio (16 kHz mono Float32) -> log-mel -> ONNX -> phonetic script. */
-importScripts('engine.js', 'mel.js', 'ort/ort.wasm.min.js');
+const V = new URL(location.href).searchParams.get('v') || '';
+importScripts('engine.js?v=' + V, 'mel.js?v=' + V, 'ort/ort.wasm.min.js');
 
 let session = null, vocab = null, inNames = null, outName = null;
 
