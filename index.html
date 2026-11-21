@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>e-Muhaffiz</title>
+<title>Tasmi AI</title>
 <meta name="theme-color" content="#0f5132">
 <style>
 @font-face{font-family:"Amiri Quran";src:url(fonts/amiri-quran-arabic-400-normal.woff2) format("woff2");unicode-range:U+0600-06FF,U+0750-077F,U+0870-088E,U+0890-0891,U+0897-08E1,U+08E3-08FF,U+200C-200E,U+2010-2011,U+204F,U+2E41,U+FB50-FDFF,U+FE70-FE74,U+FE76-FEFC;font-display:block}
@@ -43,8 +43,11 @@ input.n{width:72px}
 .w{padding:0 2px;border-radius:6px;cursor:pointer;transition:background .15s,color .15s}
 .hide .w.p{color:transparent;background:linear-gradient(#ece5d4,#ece5d4) no-repeat center 62%/100% 30%}
 .w.ok{color:var(--green)}
-.w.kh{color:var(--green);background:var(--amber2);box-shadow:inset 0 -3px 0 var(--amber)}
-.w.jali{color:var(--red);background:var(--red2)}
+.w.wr,.w.ms{color:var(--red);background:var(--red2)}
+.w.ms{text-decoration:underline dotted var(--red)}
+.hide .w.live,.w.live{color:#2f7d55;background:var(--green2)}
+.hide .w.hint,.w.hint{color:var(--blue);background:var(--blue2)}
+.heard{direction:rtl;font-size:15px;color:var(--mute);margin-top:8px;min-height:1.4em}
 .w.fixed{color:var(--green);text-decoration:underline wavy var(--red);text-underline-offset:7px}
 .w.cur{outline:2px solid var(--gold);outline-offset:1px}
 .am{display:inline-flex;align-items:center;justify-content:center;min-width:1.25em;height:1.25em;font-size:.6em;border:1.5px solid var(--gold);border-radius:50%;color:var(--gold);margin:0 4px;line-height:1;vertical-align:middle;padding:0 .2em}
@@ -90,7 +93,7 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
 <body>
 <div class="wrap">
   <header>
-    <h1>e-Muhaffiz<span>تسميع</span></h1>
+    <h1>Tasmi AI<span>تسميع</span></h1>
     <div class="sub" id="status">Loading…</div>
   </header>
 
@@ -114,24 +117,23 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
       <div class="seg" id="modeSeg"><button data-m="mic" class="on">Listen to me</button><button data-m="self">Self-check</button></div>
       <label><input type="checkbox" id="hideT" checked>Hide text</label>
       <label><input type="checkbox" id="voiceOn" checked>Say the right word</label>
-      <label><input type="checkbox" id="stopKh">Also stop me for tajweed</label>
     </div>
-    <div class="model" id="modelBox"><span id="modelTxt">Preparing the tajweed model…</span><div class="bar"><i id="modelBar"></i></div></div>
     <div class="note" id="note"></div>
   </div>
 
   <div class="card" id="mushaf"></div>
   <div class="legend">
     <span><b style="background:var(--green)"></b>Correct</span>
-    <span><b style="background:var(--amber)"></b>Tajweed remark</span>
+    <span><b style="background:#9fd3b5"></b>Being heard</span>
     <span><b style="background:var(--red)"></b>Mistake</span>
     <span><b style="background:var(--green);box-shadow:inset 0 -2px 0 var(--red)"></b>Fixed after correction</span>
     <span>Tap a word to see what was heard.</span>
   </div>
   <div class="stats" id="stats"></div>
+  <div class="heard" id="heard" dir="rtl"></div>
 
   <details class="hist" id="histBox"><summary>Past tasmi sessions</summary><ul id="hist"></ul></details>
-  <details class="dbg"><summary>What the model heard (for troubleshooting)</summary>
+  <details class="dbg"><summary>What was heard (for troubleshooting)</summary>
     <div class="row" style="margin:6px 0"><button class="btn" id="copyLog" style="padding:6px 10px">Copy log</button></div>
     <div id="log"></div>
   </details>
@@ -150,7 +152,7 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
 
 <div class="bar-b"><div class="in">
   <button class="btn" id="hintBtn">Hint</button>
-  <button class="btn main" id="mainBtn" disabled><span class="lvl" id="lvl"></span><span id="mainTxt">Start tasmi</span></button>
+  <button class="btn main" id="mainBtn"><span class="lvl" id="lvl"></span><span id="mainTxt">Start tasmi</span></button>
   <button class="btn" id="doneBtn">Finish</button>
 </div></div>
 
@@ -171,9 +173,8 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
   </div>
 </div></dialog>
 
-<script src="engine.js?v=5"></script>
-<script src="audio.js?v=5"></script>
-<script>window.TASMI_V = "5";</script>
-<script src="app.js?v=5"></script>
+<script src="recite.js?v=6"></script>
+<script>window.TASMI_V = "6";</script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

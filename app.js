@@ -1,82 +1,39 @@
-/* e-Muhaffiz app: listens breath by breath, judges with the tajweed model + engine, stops on mistakes and says the
- * right word, then keeps listening on its own. */
+/* Tasmi AI: listens with the browser's speech recognition, matches every word against the passage, stops on a
+ * wrong or skipped word and says the right one, then keeps listening on its own. */
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const TEST = params.has('test');
   const VER = window.TASMI_V || '';
-  const HF = 'https://huggingface.co/Hisnlabs/tajweed-v2/resolve/main/onnx/';
-  const MODEL_URL = params.get('model') || HF + 'model-int8.onnx';
-  // the browser runtime can't run the int8 model's ConvInteger layers: fall back to the full-precision export
-  const FALLBACK_URLS = params.get('fallback') ? [params.get('fallback')] : params.get('model') ? [] : [HF + 'model-fp32.onnx'];
-  const CACHE = 'emuhaffiz-tajweed-v2';
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
-  const disp = (ai, k) => (S[ai].d || S[ai].w)[k];   // the mushaf spelling shown (and spoken)
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   // ---------- state ----------
-  let SURAHS = [], S = null, sn = 1, passage = [], W = [], spans = [];
-  let pos = 0, mode = 'mic', listening = false, selfPtr = 0;
-  let worker = null, modelReady = false, vocab = null, mic = null, vad = null;
-  let queue = [], busy = false, breathNo = 0, stop = null, tempo = [], hints = new Set();
+  let SURAHS = [], DIV = null, START = [], S = [], passage = [], T = [], W = [], spans = [];
+  let pos = 0, mode = 'mic', listening = false, selfPtr = 0, hints = new Set(), stop = null, unitLabel = '';
+  let heardFinal = '', interim = '', live = null, muted = false;
   const log = [];
-
-  // ---------- model ----------
-  function initModel() {
-    worker = new Worker('hear-worker.js?v=' + VER);
-    worker.onmessage = e => {
-      const m = e.data;
-      if (m.type === 'progress') {
-        if (m.stage === 'download') {
-          const pct = m.total ? Math.round(100 * m.got / m.total) : 0;
-          $('modelTxt').textContent = `Downloading the tajweed model (once${m.attempt ? ', full version' : ''}): ${(m.got / 1048576).toFixed(1)}${m.total ? ' / ' + (m.total / 1048576).toFixed(0) : ''} MB`;
-          $('modelBar').style.width = pct + '%';
-        } else if (m.stage === 'cached') $('modelTxt').textContent = 'Loading the tajweed model…';
-        else if (m.stage === 'starting') { $('modelTxt').textContent = 'Starting the tajweed model…'; $('modelBar').style.width = '100%'; }
-        else if (m.stage === 'fallback') { $('modelTxt').textContent = 'This browser needs the full version of the model — downloading it (once)…'; $('modelBar').style.width = '0'; }
-      } else if (m.type === 'ready') {
-        modelReady = true; $('modelBox').style.display = 'none'; setMain(); status();
-        if (TEST) window.__modelUsed = m.model;
-      } else if (m.type === 'error' && m.stage === 'init') {
-        $('modelTxt').textContent = 'Could not start the tajweed model: ' + m.message + ' — please send Claude a screenshot. Self-check still works.';
-        $('modelBar').style.width = '0';
-      } else if (m.type === 'heard' || m.type === 'error') {
-        const cb = pending.get(m.id); pending.delete(m.id); if (cb) cb(m);
-      }
-    };
-    worker.postMessage({ type: 'init', modelUrl: new URL(MODEL_URL, location.href).href, fallbackUrls: FALLBACK_URLS.map(u => new URL(u, location.href).href), ortBase: new URL('ort/', location.href).href, vocab, cacheName: CACHE });
-  }
-  const pending = new Map(); let reqId = 0;
-  function hear(audio) {
-    if (TEST && window.__hear) return Promise.resolve(window.__hear(audio, breathNo));
-    return new Promise(res => { const id = ++reqId; pending.set(id, res); worker.postMessage({ type: 'hear', id, audio, riwaya: 0 }, [audio.buffer]); });
-  }
-
-  // ---------- passage ----------
-  async function loadSurah(n) {
-    if (!loadSurah.cache) loadSurah.cache = {};
-    if (!loadSurah.cache[n]) loadSurah.cache[n] = await (await fetch(`data/${n}.json?v=${VER}`)).json();
-    return loadSurah.cache[n];
-  }
-  // ---------- choosing what to recite: safha, ruba, nisf, para, one ayah, or an ayah range ----------
-  let DIV = null, START = [], unitLabel = '';
-  const idOf = (sn, an) => START[sn] + an - 1;                    // global ayah number 1..6236
-  function sa(id) { let s = 1; while (s < 114 && START[s + 1] <= id) s++; return [s, id - START[s] + 1]; }
+  const disp = (ai, k) => S[ai].d[k];
+  const wordName = i => passage[i] ? disp(passage[i][0], passage[i][1]) : '';
   const ayahRef = (sn, an) => `${sn}:${an}`;
+  const refOf = i => ayahRef(S[passage[i][0]].sn, S[passage[i][0]].an);
+
+  // ---------- what to recite: safha, ruba, nisf, para, one ayah, or an ayah range (Madani 604-page mushaf) ----------
+  const idOf = (sn, an) => START[sn] + an - 1;
+  function sa(id) { let s = 1; while (s < 114 && START[s + 1] <= id) s++; return [s, id - START[s] + 1]; }
   function showSel() {
     const u = $('unit').value;
     document.querySelectorAll('#sel [data-u]').forEach(l => { l.style.display = l.dataset.u.split(' ').includes(u) ? '' : 'none'; });
   }
   function clampInputs() {
-    const u = $('unit').value, cl = (el, lo, hi) => { el.value = Math.max(lo, Math.min(hi, Math.round(+el.value || lo))); return +el.value; };
+    const cl = (el, lo, hi) => { el.value = Math.max(lo, Math.min(hi, Math.round(+el.value || lo))); return +el.value; };
     cl($('page'), 1, 604); cl($('para'), 1, 30);
     const n = SURAHS[+$('surah').value - 1][3];
     cl($('ayah'), 1, n); const f = cl($('from'), 1, n); $('to').value = Math.max(f, Math.min(n, +$('to').value || n));
-    return u;
+    return $('unit').value;
   }
-  /** [first, last] global ayah ids of the chosen unit, and a label for it */
   function chosen() {
     const u = clampInputs(), j = +$('para').value, sn = +$('surah').value;
     if (u === 'page') return { r: DIV.page[+$('page').value - 1], label: 'Safha ' + $('page').value };
@@ -95,15 +52,18 @@
       if (k > n) { k = 1; j++; } if (k < 1) { k = n; j--; }
       if (j >= 1 && j <= 30) { el.value = k; $('para').value = j; }
     } else {
-      const sn = +$('surah').value, cur = chosen().r, len = cur[1] - cur[0] + 1;
-      const id = d > 0 ? cur[1] + 1 : cur[0] - len;
+      const cur = chosen().r, len = cur[1] - cur[0] + 1, id = d > 0 ? cur[1] + 1 : cur[0] - len;
       if (id < 1 || id > 6236) return;
       const [s2, a2] = sa(id); $('surah').value = s2;
       if (u === 'ayah') $('ayah').value = a2;
-      else { const n = SURAHS[s2 - 1][3]; $('from').value = a2; $('to').value = Math.min(n, a2 + len - 1); }
-      if (s2 !== sn && u === 'range') { /* moved into the next surah */ }
+      else { $('from').value = a2; $('to').value = Math.min(SURAHS[s2 - 1][3], a2 + len - 1); }
     }
     build();
+  }
+  const surahCache = {};
+  async function loadSurah(n) {
+    if (!surahCache[n]) surahCache[n] = (await (await fetch(`words/${n}.json?v=${VER}`)).json()).map((a, i) => ({ ...a, sn: n, an: i + 1 }));
+    return surahCache[n];
   }
   async function build() {
     showSel();
@@ -114,27 +74,23 @@
     lsSet('tasmi.sel', { unit: $('unit').value, page: $('page').value, para: $('para').value, ruba: $('ruba').value, nisf: $('nisf').value,
       surah: $('surah').value, ayah: $('ayah').value, from: $('from').value, to: $('to').value });
     const token = (build.token = (build.token || 0) + 1);
-    // the passage may run across surahs (a page often does): one list of ayat, each knowing its surah and number
     const ayat = [];
     for (let sn = s0; sn <= s1; sn++) {
       const data = await loadSurah(sn);
-      const from = sn === s0 ? a0 : 1, to = sn === s1 ? a1 : data.length;
-      for (let an = from; an <= to; an++) ayat.push({ ...data[an - 1], sn, an });
+      for (let an = sn === s0 ? a0 : 1; an <= (sn === s1 ? a1 : data.length); an++) ayat.push(data[an - 1]);
     }
-    if (token !== build.token) return;          // a newer choice was made while loading
-    S = ayat; sn = s0;
-    passage = [];
-    S.forEach((a, ai) => a.w.forEach((_, k) => passage.push([ai, k])));
+    if (token !== build.token) return;
+    if (listening) stopListening();
+    S = ayat; passage = [];
+    S.forEach((a, ai) => a.d.forEach((_, k) => passage.push([ai, k])));
+    T = Recite.tokens(S, passage);
     const box = $('mushaf'); box.innerHTML = ''; spans = [];
     const frag = document.createDocumentFragment();
     passage.forEach(([ai, k], i) => {
-      if (k === 0 && S[ai].an === 1) {
-        const h = document.createElement('span'); h.className = 'sh'; h.textContent = 'سورة ' + SURAHS[S[ai].sn - 1][1];
-        frag.appendChild(h);
-      }
+      if (k === 0 && S[ai].an === 1) { const h = document.createElement('span'); h.className = 'sh'; h.textContent = 'سورة ' + SURAHS[S[ai].sn - 1][1]; frag.appendChild(h); }
       const sp = document.createElement('span'); sp.className = 'w p'; sp.textContent = disp(ai, k); sp.dataset.i = i;
       spans.push(sp); frag.appendChild(sp); frag.appendChild(document.createTextNode(' '));
-      if (k === S[ai].w.length - 1) {
+      if (k === S[ai].d.length - 1) {
         const am = document.createElement('span'); am.className = 'am'; am.textContent = S[ai].an.toLocaleString('ar-EG');
         frag.appendChild(am); frag.appendChild(document.createTextNode(' '));
       }
@@ -143,203 +99,212 @@
     reset(); setMain();
   }
   function reset() {
-    W = passage.map(() => ({ st: 'p', notes: [], madd: [], everJali: false, tries: 0 }));
-    pos = 0; selfPtr = 0; queue = []; hints = new Set(); tempo = []; hideStop(); render();
+    W = passage.map(() => ({ st: 'p', everWrong: false, heard: '' }));
+    pos = 0; selfPtr = 0; hints = new Set(); heardFinal = ''; interim = ''; live = null; hideStop(); render();
   }
 
-  // ---------- listening ----------
-  async function startListening() {
-    if (!modelReady && !TEST) { note('The tajweed model is still loading — one moment.'); return; }
-    note('');
-    if (!vad) vad = new Audio16.Vad({ onSegment: onBreath, onLevel: lvl => { $('lvl').style.transform = `scale(${1 + Math.min(1.6, lvl * 25)})`; } });
-    if (!mic) mic = new Audio16.Mic(vad);
-    try { await mic.start(); } catch (e) {
-      note(e && e.name === 'NotAllowedError' ? 'Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap Start again.' : 'Could not open the microphone: ' + esc(e.message || e));
+  // ---------- the listener: the browser's speech recognition, restarted after every phrase ----------
+  function makeListener() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return null;
+    let want = false, rec = null, lastErr = null, epoch = 0;
+    const h = { f: [], p: [], s: [] }, emit = (k, e) => h[k].forEach(fn => fn(e));
+    function open() {
+      const my = ++epoch;
+      rec = new SR(); rec.lang = 'ar-SA'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
+      rec.onresult = e => {
+        if (my !== epoch) return;          // a phrase from before a stop: ignore
+        let fin = '', par = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) fin += t; else par += t; }
+        if (fin.trim()) emit('f', fin.trim()); else emit('p', par.trim());
+      };
+      rec.onerror = e => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { want = false; lastErr = 'not_granted'; }
+        else if (e.error === 'language-not-supported') { want = false; lastErr = 'unavailable'; }
+        else if (e.error === 'network') lastErr = 'network';
+      };
+      rec.onend = () => {
+        if (my !== epoch) return;
+        rec = null;
+        if (want) setTimeout(() => { if (want && !rec) { try { open(); } catch (err) { want = false; emit('s', { state: 'idle', reason: 'error' }); } } }, 60);
+        else emit('s', { state: 'idle', reason: lastErr || 'stopped' });
+      };
+      rec.start();
+    }
+    return {
+      start() { if (want) return; want = true; lastErr = null; open(); emit('s', { state: 'listening' }); },
+      stop() { want = false; epoch++; if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason: 'stopped' }); },
+      onFinal(fn) { h.f.push(fn); }, onPartial(fn) { h.p.push(fn); }, onState(fn) { h.s.push(fn); },
+    };
+  }
+  let L = null;
+  function startListening() {
+    if (!L) {
+      L = makeListener();
+      if (!L) { note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.'); return; }
+      L.onPartial(t => { if (!muted) { interim = t; think(false); } });
+      L.onFinal(t => { if (!muted) { heardFinal += ' ' + t; interim = ''; think(true); } });
+      L.onState(({ state, reason }) => {
+        if (state === 'idle' && !muted) {
+          listening = false;
+          if (reason === 'not_granted') note('Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap Start again.');
+          else if (reason === 'unavailable') note('Arabic speech recognition is not available in this browser. Use Chrome, or Self-check.');
+          else if (reason === 'network') note('Speech recognition needs internet. Check your connection and tap Start.');
+        }
+        setMain(); status();
+      });
+    }
+    note(''); heardFinal = ''; interim = '';
+    try { L.start(); listening = true; } catch (e) { note('Could not start the microphone: ' + esc(e.message || e)); }
+    setMain(); render(); status();
+  }
+  function stopListening() { listening = false; if (L) L.stop(); live = null; setMain(); render(); status(); }
+
+  // ---------- each time words come in: where are we, and is anything wrong? ----------
+  function think(final) {
+    const said = (heardFinal + ' ' + interim).trim();
+    if (!said) return;
+    // basmala / isti'adha before the words are not part of the passage — except in al-Fatiha, where the basmala is ayah 1
+    let fatiha = false;
+    for (let i = Math.max(0, pos - 8); i <= Math.min(pos, passage.length - 1); i++) { const x = S[passage[i][0]]; if (x.sn === 1 && x.an <= 2) fatiha = true; }
+    const text = fatiha ? said : Recite.withoutPreamble(said);
+    if (!fatiha && (!text || Recite.isPreamble(said))) {
+      if (final) { addLog({ heard: said, result: 'basmala / isti\'adha — ignored' }); heardFinal = ''; live = null; render(); }
       return;
     }
-    listening = true; setMain(); render();
-  }
-  async function stopListening() { listening = false; if (mic) { await mic.stop(); mic = null; } setMain(); render(); }
-
-  function onBreath(audio) { if (!listening || mode !== 'mic') return; queue.push(audio); pump(); }
-  async function pump() {
-    if (busy || !queue.length) return;
-    busy = true; status();
-    const audio = queue.shift(); breathNo++;
-    const seconds = audio.length / 16000;   // measured before the buffer is handed to the worker
-    try { const h = await hear(audio); judge(h, seconds); }
-    catch (e) { addLog({ n: breathNo, error: String(e) }); }
-    busy = false; status(); pump();
-  }
-
-  /** one breath heard: where was it, what was right, does the muhaffiz stop? */
-  function judge(h, seconds) {
-    const entry = { n: breathNo, sec: +seconds.toFixed(1), ms: h.ms, heard: h.text };
-    if (h.type === 'error') { entry.error = h.message; return addLog(entry); }
-    if (!h.text || h.text.replace(/[َُِ]/g, '').length < 3) { entry.skip = 'no recitation heard'; return addLog(entry); }
-    const loc = Engine.locate(S, passage, pos, h.text);
-    if (!loc) return addLog(entry);
-    const refPh = Engine.phonemesOf(S, passage.slice(loc.a, loc.b));
-    const ratio = loc.cost / Math.max(refPh.length, h.text.length);
-    Object.assign(entry, { a: loc.a, b: loc.b, cost: +loc.cost.toFixed(1), ratio: +ratio.toFixed(2), expected: refPh });
-    if (ratio > 0.55 && isPreamble(h.text)) { entry.skip = 'basmala / isti\'adha'; return addLog(entry); }
-    if (ratio > 0.55) {
-      entry.skip = 'not this passage (isti\'adha, basmala, or another ayah?)';
+    const res = Recite.assess(T, passage, pos, text);
+    const d = Recite.decide(res, passage, T, final);
+    live = res && res.frontier >= res.a ? res : null;
+    if (d.stop != null) return correct(res, d, text);
+    if (final) {
+      const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
+      if (d.commit != null) {
+        for (let i = res.a; i < d.commit; i++) mark(i, 'ok');
+        pos = d.commit; entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
+        hideStop();
+        if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
+      } else { entry.result = 'did not match the passage'; if (pos > 0) toastNote(`That didn't match. Carry on from <b>${esc(wordName(pos))}</b>.`); }
       addLog(entry);
-      if (pos > 0) toastNote(`That didn't match the passage. Carry on from ${wordName(pos)}.`);
-      return;
-    }
-    const ref = Engine.buildRef(S, passage.slice(loc.a, loc.b));
-    const res = Engine.listen(ref, h.text, { probs: h.probs, times: h.times, tempo, minProb: 0.3, minProbJali: 0.7 });
-    res.forEach((r, k) => {
-      const i = loc.a + k, prev = W[i];
-      const everJali = prev.everJali || r.jali;
-      let st = r.jali ? 'jali' : r.notes.length ? 'kh' : 'ok';
-      if (!r.jali && prev.everJali && st === 'ok') st = 'fixed';
-      W[i] = { st, notes: r.notes, madd: r.madd, everJali, tries: prev.tries + 1, lastNotes: r.notes.length ? r.notes : prev.lastNotes };
-    });
-    entry.remarks = res.filter(r => r.notes.length).map(r => `${r.word}: ${r.notes.map(n => n.msg.en).join('; ')}`);
-    addLog(entry);
-    hideStop();
-    const j = res.findIndex(r => r.jali);
-    const kj = $('stopKh').checked ? res.findIndex(r => r.notes.length) : -1;
-    const first = j >= 0 && (kj < 0 || j <= kj) ? j : kj;
-    if (first >= 0) {
-      pos = loc.a + first;
-      showStop(pos, res[first], loc.b);
-    } else {
-      pos = loc.b;
-      if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result.');
+      heardFinal = ''; live = null;
     }
     render();
   }
-
-  // basmala and isti'adha are recited before a surah / a session: recognise them so they are not taken for mistakes
-  let PREAMBLE = [];
-  async function preambles() {
-    const f = await loadSurah(1);
-    return [Engine.phonemesOf(f, f[0].w.map((_, k) => [0, k])), 'ءَعُوذُبِللَااهِمِنَششَيطَاانِررَجِۦۦۦۦم'];
-  }
-  function isPreamble(t) {
-    t = t.replace(/ /g, '');
-    return PREAMBLE.some(p => Engine.distance(p, t) / Math.max(p.length, t.length) < 0.35 ||
-      (t.length > p.length && Engine.distance(p, t.slice(0, p.length)) / p.length < 0.3 && t.length - p.length < 12));
+  function mark(i, st, heard) {
+    const w = W[i];
+    if (st === 'ok') W[i] = { ...w, st: w.everWrong ? 'fixed' : 'ok' };
+    else W[i] = { st, everWrong: true, heard: heard || w.heard };
   }
 
-  // ---------- the muhaffiz stops you ----------
-  const speakable = t => t.replace(/[ۖ-ۭ]/g, '').replace(/ٱ/g, 'ا');
-  function showStop(i, r, breathEnd) {
-    const jali = r.notes.some(n => n.severity === 'jali');
-    const missing = r.notes.some(n => n.rule === 'word');
-    stop = { i, breathEnd };
-    $('stopCard').className = 'show' + (jali ? '' : ' kh');
+  // ---------- the muhaffiz stops you and says the right word ----------
+  function correct(res, d, text) {
+    for (let i = res.a; i < d.stop; i++) mark(i, 'ok');
+    mark(d.stop, d.kind === 'ms' ? 'ms' : 'wr', d.heard);
+    pos = d.stop; heardFinal = ''; interim = ''; live = null;
+    addLog({ heard: text, at: `${res.a + 1}–${res.frontier + 1}`, result: (d.kind === 'ms' ? 'skipped ' : 'wrong ') + wordName(d.stop) + (d.heard ? ` (heard ${d.heard})` : '') });
+    stop = { i: d.stop, kind: d.kind, heard: d.heard };
+    $('stopCard').className = 'show';
     document.body.classList.add('stopped');
-    requestAnimationFrame(() => { const sp = spans[i]; if (sp) { const r = sp.getBoundingClientRect(); window.scrollBy({ top: r.top - 120, behavior: 'smooth' }); } });
-    $('scTitle').textContent = (missing ? 'You skipped' : jali ? 'Mistake' : 'Tajweed') + ' · ayah ' + ayahRef(S[passage[i][0]].sn, S[passage[i][0]].an);
-    $('scWord').textContent = disp(passage[i][0], passage[i][1]);
-    $('scWhy').innerHTML = r.notes.slice(0, 3).map(n => `<div>${esc(n.msg.en)}</div><div class="ar">${esc(n.msg.ar)}</div>`).join('');
-    $('scRight').style.display = missing ? 'none' : '';
-    sayWord(i, jali ? null : r.notes[0]);
+    $('scTitle').textContent = (d.kind === 'ms' ? 'You skipped' : 'Mistake') + ' · ayah ' + refOf(d.stop);
+    $('scWord').textContent = wordName(d.stop);
+    $('scWhy').textContent = d.kind === 'ms' ? 'This word was left out.' : d.heard ? 'You said: ' + d.heard : '';
+    $('scRight').style.display = d.kind === 'ms' ? 'none' : '';
+    render();
+    requestAnimationFrame(() => { const sp = spans[d.stop]; if (sp) window.scrollBy({ top: sp.getBoundingClientRect().top - 120, behavior: 'smooth' }); });
+    say(d.stop);
   }
   function hideStop() { $('stopCard').className = ''; document.body.classList.remove('stopped'); stop = null; }
+  const speakable = t => t.replace(/[ۖ-ۭ]/g, '').replace(/ٱ/g, 'ا');
   function arabicVoice() { const v = speechSynthesis.getVoices(); return v.find(x => /^ar[-_]SA/i.test(x.lang)) || v.find(x => /^ar/i.test(x.lang)) || null; }
-  function sayWord(i, remark) {
-    const word = speakable(disp(passage[i][0], passage[i][1]));
-    if (mic) mic.pause();
-    const done = () => setTimeout(() => { if (mic && listening) mic.resume(); }, 350);
-    if (!$('voiceOn').checked || !window.speechSynthesis) { setTimeout(done, 900); return; }
-    if (TEST && window.__spoken) { window.__spoken.push(word); done(); return; }
+  /** pause listening, say the word, listen again */
+  function say(i) {
+    const word = speakable(wordName(i));
+    const wasListening = listening;
+    muted = true; if (L && wasListening) L.stop(); listening = wasListening;
+    const resume = () => { muted = false; if (wasListening && mode === 'mic') { heardFinal = ''; interim = ''; L.start(); listening = true; } setMain(); status(); };
+    if (TEST && window.__spoken) { window.__spoken.push(word); setTimeout(resume, 30); return; }
+    if (!$('voiceOn').checked || !window.speechSynthesis) { setTimeout(resume, 700); return; }
     try {
       speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(word); u.lang = 'ar-SA'; const v = arabicVoice(); if (v) u.voice = v; u.rate = 0.8;
-      let fired = false; const fin = () => { if (!fired) { fired = true; done(); } };
-      u.onend = fin; u.onerror = fin; setTimeout(fin, 6000);
+      let done = false; const fin = () => { if (!done) { done = true; setTimeout(resume, 250); } };
+      u.onend = fin; u.onerror = fin; setTimeout(fin, 5000);
       speechSynthesis.speak(u);
-      if (remark) { const r = new SpeechSynthesisUtterance(remark.msg.en); r.lang = 'en-US'; speechSynthesis.speak(r); }
-    } catch (e) { done(); }
+    } catch (e) { resume(); }
   }
 
   // ---------- rendering ----------
   function render() {
-    let ok = 0, jali = 0, kh = 0, fixed = 0, cur = -1;
+    let ok = 0, wrong = 0, fixed = 0;
     const reach = mode === 'self' ? selfPtr : pos;
     for (let i = 0; i < W.length; i++) {
       let st = W[i].st;
-      if (mode === 'self') st = W[i].st === 'jali' ? 'jali' : i < selfPtr ? 'ok' : 'p';
-      if (st === 'ok') ok++; else if (st === 'jali') jali++; else if (st === 'kh') kh++; else if (st === 'fixed') fixed++;
-      const c = 'w ' + st + (i === reach && (listening || mode === 'self') ? ' cur' : '') + (hints.has(i) && st === 'p' ? ' ok' : '');
+      if (mode === 'self') st = W[i].st === 'wr' ? 'wr' : i < selfPtr ? 'ok' : 'p';
+      if (st === 'p' && live && i >= live.a && i <= live.frontier) st = 'live';   // being recited right now
+      if (st === 'p' && hints.has(i)) st = 'hint';
+      if (W[i].st === 'ok') ok++; else if (W[i].st === 'wr' || W[i].st === 'ms') wrong++; else if (W[i].st === 'fixed') fixed++;
+      const c = 'w ' + st + (i === reach && (listening || mode === 'self') ? ' cur' : '');
       if (spans[i] && spans[i]._c !== c) { spans[i].className = c; spans[i]._c = c; }
-      if (i === reach) cur = i;
     }
-    if (cur >= 0 && spans[cur] && (listening || mode === 'self')) {
-      const r = spans[cur].getBoundingClientRect();
-      if (r.top > innerHeight - 280 || r.top < 60) spans[cur].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const cur = spans[Math.min(reach, spans.length - 1)];
+    if (cur && (listening || mode === 'self')) {
+      const r = cur.getBoundingClientRect();
+      if (r.top > innerHeight - 280 || r.top < 60) cur.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
     const pct = W.length ? Math.round(100 * Math.min(reach, W.length) / W.length) : 0;
-    $('stats').innerHTML = `<span>Progress <b>${pct}%</b></span><span>Correct <b>${ok}</b></span><span>Tajweed <b>${kh}</b></span><span>Mistakes <b>${jali}</b></span><span>Fixed <b>${fixed}</b></span>`;
+    $('stats').innerHTML = `<span>Progress <b>${pct}%</b></span><span>Correct <b>${ok}</b></span><span>Mistakes <b>${wrong}</b></span><span>Fixed <b>${fixed}</b></span>`;
     $('mushaf').classList.toggle('hide', $('hideT').checked);
+    $('heard').textContent = listening && (heardFinal || interim) ? (heardFinal + ' ' + interim).trim().split(/\s+/).slice(-12).join(' ') : '';
   }
   function setMain() {
     const b = $('mainBtn');
-    b.disabled = mode === 'mic' && !modelReady && !TEST;
     b.classList.toggle('live', listening);
-    if (mode === 'self') { $('mainTxt').textContent = 'Reveal next ayah'; $('hintBtn').textContent = 'Next word'; b.disabled = false; }
+    if (mode === 'self') { $('mainTxt').textContent = 'Reveal next ayah'; $('hintBtn').textContent = 'Next word'; }
     else { $('mainTxt').textContent = listening ? 'Stop listening' : (W.some(w => w.st !== 'p') ? 'Continue' : 'Start tasmi'); $('hintBtn').textContent = 'Hint'; }
   }
-  function status() {
-    $('status').textContent = mode === 'self' ? 'Self-check' : !modelReady && !TEST ? 'Loading model…' : busy ? 'Checking…' : listening ? 'Listening' : 'Ready';
-  }
+  function status() { $('status').textContent = mode === 'self' ? 'Self-check' : listening ? 'Listening' : 'Ready'; }
   function note(msg) { $('note').innerHTML = msg || ''; $('note').classList.toggle('show', !!msg); }
   let toastT = 0;
   function toastNote(msg) { note(msg); clearTimeout(toastT); toastT = setTimeout(() => note(''), 6000); }
-  const wordName = i => passage[i] ? disp(passage[i][0], passage[i][1]) : '';
   function addLog(e) {
-    log.push(e); if (log.length > 200) log.shift();
+    e.t = new Date().toLocaleTimeString(); log.push(e); if (log.length > 200) log.shift();
     if (TEST) window.__log = log;
-    const line = [`#${e.n} ${e.sec ?? ''}s ${e.ms ?? ''}ms`, e.a != null ? `words ${e.a + 1}–${e.b} cost ${e.cost} (${e.ratio})` : '', e.skip || e.error || '',
-      `heard:    ${e.heard ?? ''}`, e.expected ? `expected: ${e.expected}` : '', ...(e.remarks || [])].filter(Boolean).join('\n');
-    const el = $('log'); el.textContent = line + '\n\n' + el.textContent.slice(0, 20000);
+    $('log').textContent = `${e.t}  ${e.at ? 'words ' + e.at + '  ' : ''}${e.result}\nheard: ${e.heard}\n\n` + $('log').textContent.slice(0, 20000);
   }
 
   // ---------- word sheet & summary ----------
   function openWord(i) {
     const w = W[i]; if (!w || w.st === 'p') return;
     $('wdWord').textContent = wordName(i);
-    const notes = w.notes.length ? w.notes : (w.lastNotes || []);
-    const madd = (w.madd || []).map(m => `<li>${esc(m.name.en)}: held ${m.heard} counts</li>`).join('');
-    $('wdBody').innerHTML = (notes.length ? '<ul>' + notes.map(n => `<li><b>${n.severity === 'jali' ? 'Mistake' : 'Tajweed'}:</b> ${esc(n.msg.en)}<div dir="rtl" style="color:var(--mute)">${esc(n.msg.ar)}</div></li>`).join('') + '</ul>' : '<p>No remarks on this word.</p>') +
-      (w.st === 'fixed' ? '<p>You got this word wrong first, then fixed it.</p>' : '') + (madd ? '<p>Madd heard:</p><ul>' + madd + '</ul>' : '');
-    $('wdOk').onclick = () => { W[i] = { ...w, st: 'ok', notes: [], everJali: false }; $('wordDlg').close(); render(); };
+    $('wdBody').innerHTML = w.st === 'ok' ? '<p>Recited correctly.</p>'
+      : w.st === 'fixed' ? `<p>You got this word wrong first${w.heard ? ' (said <b>' + esc(w.heard) + '</b>)' : ''}, then fixed it.</p>`
+      : w.st === 'ms' ? '<p>This word was skipped.</p>' : `<p>Mistake${w.heard ? ': you said <b>' + esc(w.heard) + '</b>' : ''}.</p>`;
+    $('wdOk').onclick = () => { W[i] = { st: 'ok', everWrong: false, heard: '' }; $('wordDlg').close(); render(); };
     $('wdOk').style.display = w.st === 'ok' ? 'none' : '';
     $('wordDlg').showModal();
   }
   function finish() {
     if (listening) stopListening();
     hideStop();
-    const c = { ok: 0, kh: 0, jali: 0, fixed: 0 };
-    W.forEach(w => { if (w.st in c) c[w.st]++; });
-    const mistakes = W.filter(w => w.everJali).length;
+    const c = { ok: 0, fixed: 0 }; W.forEach(w => { if (w.st in c) c[w.st]++; });
+    const mistakes = W.filter(w => w.everWrong).length, unread = W.filter(w => w.st === 'p').length;
     $('sRange').textContent = unitLabel;
-    $('sBig').innerHTML = `<div><b>${c.ok}</b>Correct</div><div><b>${mistakes}</b>Mistakes</div><div><b>${c.fixed}</b>Fixed</div><div><b>${c.kh}</b>Tajweed</div>`;
+    $('sBig').innerHTML = `<div><b>${c.ok}</b>Correct</div><div><b>${mistakes}</b>Mistakes</div><div><b>${c.fixed}</b>Fixed</div><div><b>${unread}</b>Not read</div>`;
     const byAyah = new Map();
     W.forEach((w, i) => {
-      if (!(w.everJali || w.st === 'kh' || w.st === 'jali')) return;
-      const a = ayahRef(S[passage[i][0]].sn, S[passage[i][0]].an); if (!byAyah.has(a)) byAyah.set(a, []);
-      const n = (w.notes.length ? w.notes : w.lastNotes || []).map(x => x.msg.en).join('; ');
-      byAyah.get(a).push(`<span class="qw">${esc(wordName(i))}</span> — ${esc(n || (w.st === 'fixed' ? 'fixed after correction' : 'mistake'))}`);
+      if (!w.everWrong) return;
+      const a = refOf(i); if (!byAyah.has(a)) byAyah.set(a, []);
+      byAyah.get(a).push(`<span class="qw">${esc(wordName(i))}</span> — ${w.st === 'fixed' ? 'fixed after correction' : w.st === 'ms' ? 'skipped' : 'mistake'}${w.heard ? ' (said ' + esc(w.heard) + ')' : ''}`);
     });
-    const unread = W.filter(w => w.st === 'p').length;
-    $('sRev').innerHTML = (byAyah.size ? '<b>Revise:</b><ul>' + [...byAyah].map(([a, l]) => `<li>Ayah ${a}<ul>${l.map(x => `<li>${x}</li>`).join('')}</ul></li>`).join('') + '</ul>' : '<b>MashaAllah — no remarks.</b>') +
-      (unread ? `<p class="sub" style="text-align:left">${unread} words not recited yet.</p>` : '');
+    $('sRev').innerHTML = byAyah.size ? '<b>Revise:</b><ul>' + [...byAyah].map(([a, l]) => `<li>Ayah ${a}<ul>${l.map(x => `<li>${x}</li>`).join('')}</ul></li>`).join('') + '</ul>' : '<b>MashaAllah — no mistakes.</b>';
     const hist = lsGet('emuhaffiz.hist', []);
-    hist.unshift({ d: new Date().toISOString().slice(0, 16).replace('T', ' '), label: unitLabel, ...c, m: mistakes });
+    hist.unshift({ d: new Date().toISOString().slice(0, 16).replace('T', ' '), label: unitLabel, ok: c.ok, m: mistakes });
     lsSet('emuhaffiz.hist', hist.slice(0, 40)); showHist();
     $('sumDlg').showModal();
   }
   function showHist() {
     const h = lsGet('emuhaffiz.hist', []);
     $('histBox').style.display = h.length ? '' : 'none';
-    $('hist').innerHTML = h.map(x => `<li>${esc(x.d)} — ${esc(x.label || (x.s + ' ' + x.a + '–' + x.b))}: ${x.ok} correct, ${x.m ?? x.jali} mistakes, ${x.kh} tajweed remarks</li>`).join('');
+    $('hist').innerHTML = h.map(x => `<li>${esc(x.d)} — ${esc(x.label || (x.s + ' ' + x.a + '–' + x.b))}: ${x.ok} correct, ${x.m ?? 0} mistakes</li>`).join('');
   }
 
   // ---------- controls ----------
@@ -357,17 +322,16 @@
     if (i < W.length) { hints.add(i); render(); }
   });
   $('doneBtn').addEventListener('click', finish);
-  $('scGo').addEventListener('click', () => { hideStop(); if (mic && listening) mic.resume(); });
-  $('scAgain').addEventListener('click', () => { if (stop) sayWord(stop.i, null); });
+  $('scGo').addEventListener('click', () => { hideStop(); if (!listening && mode === 'mic') startListening(); });
+  $('scAgain').addEventListener('click', () => { if (stop) say(stop.i); });
   $('scRight').addEventListener('click', () => {
     if (!stop) return;
-    const w = W[stop.i]; W[stop.i] = { ...w, st: 'ok', notes: [], everJali: false };
-    pos = stop.breathEnd; hideStop(); if (mic && listening) mic.resume(); render();
+    W[stop.i] = { st: 'ok', everWrong: false, heard: '' }; pos = stop.i + 1; hideStop(); render();
   });
   $('mushaf').addEventListener('click', e => {
     const sp = e.target.closest('.w'); if (!sp) return;
     const i = +sp.dataset.i;
-    if (mode === 'self') { if (i < selfPtr) { W[i].st = W[i].st === 'jali' ? 'ok' : 'jali'; if (W[i].st === 'jali') W[i].everJali = true; render(); } return; }
+    if (mode === 'self') { if (i < selfPtr) { W[i] = W[i].st === 'wr' ? { st: 'ok', everWrong: false } : { st: 'wr', everWrong: true }; render(); } return; }
     openWord(i);
   });
   $('wdClose').addEventListener('click', () => $('wordDlg').close());
@@ -380,7 +344,7 @@
     note(mode === 'self' ? 'Recite from memory, then tap <b>Reveal next ayah</b> to check yourself. Tap a word you got wrong to mark it red.' : '');
     reset(); setMain(); status();
   });
-  ['hideT', 'voiceOn', 'stopKh'].forEach(id => {
+  ['hideT', 'voiceOn'].forEach(id => {
     const saved = lsGet('emuhaffiz.' + id, null); if (saved !== null) $(id).checked = saved;
     $(id).addEventListener('change', () => { lsSet('emuhaffiz.' + id, $(id).checked); render(); });
   });
@@ -389,22 +353,20 @@
   $('prevU').addEventListener('click', () => step(-1));
   $('nextU').addEventListener('click', () => step(1));
   $('copyLog').addEventListener('click', () => {
-    const txt = JSON.stringify({ surah: sn, from: $('from').value, to: $('to').value, ua: navigator.userAgent, log }, null, 1);
-    navigator.clipboard.writeText(txt).then(() => toastNote('Log copied. Paste it to Claude.'), () => toastNote('Could not copy.'));
+    navigator.clipboard.writeText(JSON.stringify({ unit: unitLabel, ua: navigator.userAgent, log }, null, 1))
+      .then(() => toastNote('Log copied. Paste it to Claude.'), () => toastNote('Could not copy.'));
   });
 
   // ---------- start ----------
   (async () => {
-    [SURAHS, vocab, DIV] = await Promise.all([fetch('surahs.json?v=' + VER).then(r => r.json()),
-      fetch('vocab.json?v=' + VER).then(r => r.json()).then(v => v.phonemes), fetch('divisions.json?v=' + VER).then(r => r.json())]);
+    [SURAHS, DIV] = await Promise.all([fetch('surahs.json?v=' + VER).then(r => r.json()), fetch('divisions.json?v=' + VER).then(r => r.json())]);
     START = [0, 1]; for (let n = 1; n < 114; n++) START.push(START[n] + SURAHS[n - 1][3]);
     $('surah').innerHTML = SURAHS.map(s => `<option value="${s[0]}">${s[0]}. ${s[2]} · ${s[1]}</option>`).join('');
     const sel = lsGet('tasmi.sel', null);
     if (sel) for (const [k, v] of Object.entries(sel)) if ($(k) && v != null) $(k).value = v;
-    PREAMBLE = await preambles();
     await build(); showHist(); setMain(); status();
-    if (!TEST || params.get('model')) initModel();
-    if (TEST) window.__app = { get pos() { return pos; }, get W() { return W; }, get passage() { return passage; }, get stop() { return stop; },
-      get S() { return S; }, breath: a => onBreath(a), start: startListening, fakeListen: () => { listening = true; setMain(); }, idle: () => new Promise(r => { const t = () => (!busy && !queue.length) ? r() : setTimeout(t, 20); t(); }) };
+    if (!(window.SpeechRecognition || window.webkitSpeechRecognition)) note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.');
+    if (TEST) window.__app = { get pos() { return pos; }, get W() { return W; }, get passage() { return passage; }, get S() { return S; },
+      get T() { return T; }, get stop() { return stop; }, get listening() { return listening; } };
   })();
 })();
