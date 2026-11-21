@@ -17,16 +17,29 @@ async function init(m) {
   vocab = m.vocab;
   ort.env.wasm.wasmPaths = m.ortBase;
   ort.env.wasm.numThreads = 1;
-  const bytes = await loadModel(m.modelUrl, m.cacheName);
-  postMessage({ type: 'progress', stage: 'starting' });
-  session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
-  inNames = session.inputNames; outName = session.outputNames[0];
-  // warm up so the first real breath is fast
-  await hear(new Float32Array(16000), 0);
-  postMessage({ type: 'ready' });
+  // try each model in turn: the browser runtime cannot run some quantized layers (ConvInteger), so a model that
+  // fails to start is dropped from the cache and the next one (the full-precision export) is used instead
+  const urls = [m.modelUrl, ...(m.fallbackUrls || [])];
+  let lastErr = null;
+  for (let n = 0; n < urls.length; n++) {
+    try {
+      const bytes = await loadModel(urls[n], m.cacheName, n);
+      postMessage({ type: 'progress', stage: 'starting' });
+      session = await ort.InferenceSession.create(bytes, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+      inNames = session.inputNames; outName = session.outputNames[0];
+      await hear(new Float32Array(16000), 0);   // warm up (also proves the model runs)
+      postMessage({ type: 'ready', model: urls[n] });
+      return;
+    } catch (err) {
+      lastErr = err; session = null;
+      try { (await caches.open(m.cacheName)).delete(urls[n]); } catch (e) { /* ignore */ }
+      if (n + 1 < urls.length) postMessage({ type: 'progress', stage: 'fallback', reason: String((err && err.message) || err).slice(0, 160) });
+    }
+  }
+  throw lastErr;
 }
 
-async function loadModel(url, cacheName) {
+async function loadModel(url, cacheName, attempt = 0) {
   let cache = null;
   try { cache = await caches.open(cacheName); } catch (e) { /* no Cache API: download every time */ }
   if (cache) {
@@ -41,7 +54,7 @@ async function loadModel(url, cacheName) {
     const { done, value } = await reader.read();
     if (done) break;
     parts.push(value); got += value.length;
-    if (got - lastPost > 512 * 1024) { lastPost = got; postMessage({ type: 'progress', stage: 'download', got, total }); }
+    if (got - lastPost > 512 * 1024) { lastPost = got; postMessage({ type: 'progress', stage: 'download', got, total, attempt }); }
   }
   const bytes = new Uint8Array(got); let o = 0;
   for (const p of parts) { bytes.set(p, o); o += p.length; }

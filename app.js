@@ -5,7 +5,10 @@
   const $ = id => document.getElementById(id);
   const params = new URLSearchParams(location.search);
   const TEST = params.has('test');
-  const MODEL_URL = params.get('model') || 'https://huggingface.co/Hisnlabs/tajweed-v2/resolve/main/onnx/model-int8.onnx';
+  const HF = 'https://huggingface.co/Hisnlabs/tajweed-v2/resolve/main/onnx/';
+  const MODEL_URL = params.get('model') || HF + 'model-int8.onnx';
+  // the browser runtime can't run the int8 model's ConvInteger layers: fall back to the full-precision export
+  const FALLBACK_URLS = params.get('fallback') ? [params.get('fallback')] : params.get('model') ? [] : [HF + 'model-fp32.onnx'];
   const CACHE = 'emuhaffiz-tajweed-v2';
   const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
@@ -27,20 +30,22 @@
       if (m.type === 'progress') {
         if (m.stage === 'download') {
           const pct = m.total ? Math.round(100 * m.got / m.total) : 0;
-          $('modelTxt').textContent = `Downloading the tajweed model (once): ${(m.got / 1048576).toFixed(1)}${m.total ? ' / ' + (m.total / 1048576).toFixed(0) : ''} MB`;
+          $('modelTxt').textContent = `Downloading the tajweed model (once${m.attempt ? ', full version' : ''}): ${(m.got / 1048576).toFixed(1)}${m.total ? ' / ' + (m.total / 1048576).toFixed(0) : ''} MB`;
           $('modelBar').style.width = pct + '%';
         } else if (m.stage === 'cached') $('modelTxt').textContent = 'Loading the tajweed model…';
         else if (m.stage === 'starting') { $('modelTxt').textContent = 'Starting the tajweed model…'; $('modelBar').style.width = '100%'; }
+        else if (m.stage === 'fallback') { $('modelTxt').textContent = 'This browser needs the full version of the model — downloading it (once)…'; $('modelBar').style.width = '0'; }
       } else if (m.type === 'ready') {
         modelReady = true; $('modelBox').style.display = 'none'; setMain(); status();
+        if (TEST) window.__modelUsed = m.model;
       } else if (m.type === 'error' && m.stage === 'init') {
-        $('modelTxt').textContent = 'Could not load the tajweed model: ' + m.message + '. Check your internet and reload. Self-check still works.';
+        $('modelTxt').textContent = 'Could not start the tajweed model: ' + m.message + ' — please send Claude a screenshot. Self-check still works.';
         $('modelBar').style.width = '0';
       } else if (m.type === 'heard' || m.type === 'error') {
         const cb = pending.get(m.id); pending.delete(m.id); if (cb) cb(m);
       }
     };
-    worker.postMessage({ type: 'init', modelUrl: new URL(MODEL_URL, location.href).href, ortBase: new URL('ort/', location.href).href, vocab, cacheName: CACHE });
+    worker.postMessage({ type: 'init', modelUrl: new URL(MODEL_URL, location.href).href, fallbackUrls: FALLBACK_URLS.map(u => new URL(u, location.href).href), ortBase: new URL('ort/', location.href).href, vocab, cacheName: CACHE });
   }
   const pending = new Map(); let reqId = 0;
   function hear(audio) {
