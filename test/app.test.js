@@ -20,6 +20,7 @@ async function open(surah, from, to, opts = {}) {
   await page.goto(base + '/site/index.html?test=1');
   await page.waitForFunction(() => window.__app && window.__app.passage.length > 0);
   await page.evaluate(async ([s, a, b]) => {
+    document.getElementById('unit').value = 'range';
     document.getElementById('surah').value = s; document.getElementById('from').value = a; document.getElementById('to').value = b;
     document.getElementById('to').dispatchEvent(new Event('change'));
     await new Promise(r => setTimeout(r, 300));
@@ -195,6 +196,97 @@ test('finish shows a summary with mistakes and what to revise', async () => {
   });
   assert.match(txt, /Mistakes/);
   assert.match(txt, /Revise/);
-  assert.match(txt, /Ayah 2/);
+  assert.match(txt, /Ayah 112:2/);
+  await p.close();
+});
+
+
+// ---------- listening by safha / ruba / nisf / para / ayah (Madani 604-page mushaf) ----------
+async function choose(page, set) {
+  await page.evaluate(async set => {
+    for (const [k, v] of Object.entries(set)) document.getElementById(k).value = v;
+    document.getElementById('unit').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 400));
+  }, set);
+  return page.evaluate(() => ({
+    desc: document.getElementById('unitDesc').textContent,
+    words: __app.passage.length,
+    first: [__app.S[0].sn, __app.S[0].an], last: [__app.S.at(-1).sn, __app.S.at(-1).an],
+    headers: [...document.querySelectorAll('#mushaf .sh')].map(h => h.textContent),
+  }));
+}
+test('safha 2 = al-Baqarah 2:1–2:5; safha 604 = surahs 112–114 with surah headers', async () => {
+  const p = await open(1, 1, 7);
+  let r = await choose(p, { unit: 'page', page: 2 });
+  assert.deepStrictEqual([r.first, r.last], [[2, 1], [2, 5]]);
+  assert.match(r.desc, /Safha 2/);
+  r = await choose(p, { unit: 'page', page: 604 });
+  assert.deepStrictEqual([r.first, r.last], [[112, 1], [114, 6]]);
+  assert.strictEqual(r.headers.length, 3);
+  await p.close();
+});
+test('ruba 2 of para 1 = 2:44–2:74; nisf 2 of para 30 = 100:9 to the end; para 2 starts at 2:142', async () => {
+  const p = await open(1, 1, 7);
+  let r = await choose(p, { unit: 'ruba', para: 1, ruba: 2 });
+  assert.deepStrictEqual([r.first, r.last], [[2, 44], [2, 74]]);
+  r = await choose(p, { unit: 'nisf', para: 30, nisf: 2 });
+  assert.deepStrictEqual(r.last, [114, 6]);
+  assert.deepStrictEqual(r.first[0] < 100 || (r.first[0] === 100 && r.first[1] <= 9), true);
+  r = await choose(p, { unit: 'juz', para: 2 });
+  assert.deepStrictEqual(r.first, [2, 142]);
+  await p.close();
+});
+test('one ayah: Ayat al-Kursi only; Next goes to 2:256', async () => {
+  const p = await open(1, 1, 7);
+  let r = await choose(p, { unit: 'ayah', surah: 2, ayah: 255 });
+  assert.deepStrictEqual([r.first, r.last], [[2, 255], [2, 255]]);
+  await p.click('#nextU'); await p.waitForTimeout(400);
+  r = await p.evaluate(() => [__app.S[0].sn, __app.S[0].an]);
+  assert.deepStrictEqual(r, [2, 256]);
+  await p.close();
+});
+test('Next / Previous step through pages and roll ruba over into the next para', async () => {
+  const p = await open(1, 1, 7);
+  await choose(p, { unit: 'page', page: 1 });
+  await p.click('#nextU'); await p.waitForTimeout(400);
+  assert.strictEqual(await p.evaluate(() => document.getElementById('page').value), '2');
+  await choose(p, { unit: 'ruba', para: 1, ruba: 4 });
+  await p.click('#nextU'); await p.waitForTimeout(400);
+  assert.deepStrictEqual(await p.evaluate(() => [document.getElementById('para').value, document.getElementById('ruba').value]), ['2', '1']);
+  await p.click('#prevU'); await p.waitForTimeout(400);
+  assert.deepStrictEqual(await p.evaluate(() => [document.getElementById('para').value, document.getElementById('ruba').value]), ['1', '4']);
+  await p.close();
+});
+test('reciting a page that crosses surahs, with basmala before the new surah: no stops, all correct', async () => {
+  const p = await open(1, 1, 7);
+  await choose(p, { unit: 'page', page: 604 });
+  const r = await p.evaluate(async () => {
+    window.__spoken = []; __app.fakeListen();
+    const start = sn => __app.passage.findIndex(([ai, k]) => __app.S[ai].sn === sn && __app.S[ai].an === 1 && k === 0);
+    const bas = Engine.phonemesOf(await (await fetch('/site/data/1.json')).json(), [[0, 0], [0, 1], [0, 2], [0, 3]]);
+    const b113 = start(113), b114 = start(114), n = __app.passage.length;
+    await say(ph(0, b113));
+    await say(bas);                    // بسم الله before al-Falaq
+    await say(ph(b113, b114));
+    await say(bas);
+    await say(ph(b114, n));
+    return { pos: __app.pos, n, st: __app.W.map(w => w.st), spoken: __spoken.length };
+  });
+  assert.strictEqual(r.spoken, 0);
+  assert.strictEqual(r.pos, r.n);
+  assert.ok(r.st.every(x => x === 'ok'), JSON.stringify(r.st));
+  await p.close();
+});
+test('the chosen unit is remembered after a reload', async () => {
+  const p = await browser.newPage();
+  await p.goto(base + '/site/index.html?test=1');
+  await p.waitForFunction(() => window.__app && window.__app.passage.length > 0);
+  await choose(p, { unit: 'page', page: 77 });
+  await p.reload();
+  await p.waitForFunction(() => window.__app && window.__app.passage.length > 0);
+  await p.waitForTimeout(300);
+  const r = await p.evaluate(() => [document.getElementById('unit').value, document.getElementById('page').value, document.getElementById('unitDesc').textContent]);
+  assert.deepStrictEqual(r.slice(0, 2), ['page', '77']);
+  assert.match(r[2], /Safha 77/);
   await p.close();
 });

@@ -30,6 +30,10 @@ input.n{width:72px}
 .seg button.on{background:var(--green);color:#fff}
 .opts{display:flex;gap:6px 14px;flex-wrap:wrap;margin-top:10px;align-items:center;font-size:13.5px}
 .opts label{flex-direction:row;align-items:center;gap:6px;color:var(--ink);font-size:13.5px}
+.unitnav{margin-top:10px;align-items:center;flex-wrap:nowrap}
+#unitDesc{flex:1;text-align:center;font-size:13px;color:var(--mute)}
+.btn.sm{padding:7px 11px;font-size:13px}
+.sh{display:block;text-align:center;font-size:22px;color:var(--gold);margin:6px 0 2px;line-height:1.8}
 .note{margin-top:10px;font-size:13px;padding:9px 11px;border-radius:10px;background:var(--amber2);color:#5b3a06;display:none}
 .note.show{display:block}
 .model{margin-top:10px;font-size:12.5px;color:var(--mute);display:flex;align-items:center;gap:8px}
@@ -91,11 +95,21 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
   </header>
 
   <div class="card">
-    <div class="row">
-      <label style="flex:1">Surah<select class="surah" id="surah"></select></label>
-      <label>From ayah<input class="n" id="from" type="number" min="1" value="1"></label>
-      <label>To ayah<input class="n" id="to" type="number" min="1" value="7"></label>
+    <div class="row" id="sel">
+      <label>Listen by<select id="unit">
+        <option value="page">Safha (page)</option><option value="ruba">Ruba (¼ para)</option><option value="nisf">Nisf (½ para)</option>
+        <option value="juz">Para (juz)</option><option value="ayah">One ayah</option><option value="range">Surah, ayah to ayah</option>
+      </select></label>
+      <label data-u="page">Safha<input class="n" id="page" type="number" min="1" max="604" value="1"></label>
+      <label data-u="ruba nisf juz">Para<input class="n" id="para" type="number" min="1" max="30" value="1"></label>
+      <label data-u="ruba">Ruba<select id="ruba"><option value="1">1st</option><option value="2">2nd</option><option value="3">3rd</option><option value="4">4th</option></select></label>
+      <label data-u="nisf">Nisf<select id="nisf"><option value="1">1st half</option><option value="2">2nd half</option></select></label>
+      <label data-u="ayah range" style="flex:1">Surah<select class="surah" id="surah"></select></label>
+      <label data-u="ayah">Ayah<input class="n" id="ayah" type="number" min="1" value="1"></label>
+      <label data-u="range">From ayah<input class="n" id="from" type="number" min="1" value="1"></label>
+      <label data-u="range">To ayah<input class="n" id="to" type="number" min="1" value="7"></label>
     </div>
+    <div class="row unitnav"><button class="btn sm" id="prevU">‹ Previous</button><div id="unitDesc"></div><button class="btn sm" id="nextU">Next ›</button></div>
     <div class="opts">
       <div class="seg" id="modeSeg"><button data-m="mic" class="on">Listen to me</button><button data-m="self">Self-check</button></div>
       <label><input type="checkbox" id="hideT" checked>Hide text</label>
@@ -157,8 +171,9 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
   </div>
 </div></dialog>
 
-<script src="engine.js"></script>
-<script src="audio.js"></script>
-<script src="app.js"></script>
+<script src="engine.js?v=5"></script>
+<script src="audio.js?v=5"></script>
+<script>window.TASMI_V = "5";</script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

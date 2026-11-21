@@ -19,10 +19,16 @@ and notes tajweed slips. Live at https://hamzakalolwala.github.io/Tasmi-AI/ (ser
 - `site/app.js` — UI/session: per breath → locate → listen → stop on first jali (or khafi if "also stop for tajweed")
   → speak the word (speechSynthesis, ar-SA) with the mic paused → resume automatically. `?test=1` exposes `window.__app`
   and lets tests script what the model hears via `window.__hear`.
+- `site/divisions.json` — Madani 604-page mushaf: first/last global ayah id of every page, rub' al-hizb (240) and juz
+  (30), from quran-meta (`scripts/divisions.mjs`). Ruba = ¼ para = 2 rub' al-hizb; nisf = ½ para = 4. The app's
+  "Listen by" selector builds a passage from these, across surahs if needed (`S` is then a list of ayat from several
+  surahs, each with `sn`/`an`). Basmala / isti'adha breaths are recognised and ignored (`isPreamble`).
+- Cache busting: bump `V` in index.html (`TASMI_V`) on every deploy — scripts, worker and data are loaded with `?v=`.
+- Model: tries `model-int8.onnx`, falls back to `model-fp32.onnx` (onnxruntime-web has no ConvInteger kernel).
 - `scripts/precompute.py` — regenerates `site/data` with `quran-transcript` (pip). Checks joined pieces against the
   phonetizer on random breaths (0 mismatches in 20k).
 
-## Tests (56, all passing at handover)
+## Tests (63, all passing)
 `npm install` then `node --test test/*.test.js`. Browser tests use Playwright with `/usr/bin/google-chrome`
 (adjust `executablePath` in `test/*.test.js` for your machine). Suites: engine (rules, parity with phonetizer fixtures),
 mel (vs faster-whisper), vad, stress (random mistakes across all 114 surahs; noisy-model false stops), browser
