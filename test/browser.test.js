@@ -45,3 +45,15 @@ test('real microphone path: fake mic audio → worklet → breath detection → 
   [2.5, 3.0, 2.0].forEach((want, i) => assert.ok(Math.abs(secs[i] - want) < 0.9, `breath ${i}: ${secs[i]} s`));
   console.log('    breaths:', secs.join(' s, '), 's; status:', status);
 });
+
+test('a model with ConvInteger (unsupported in the browser, like the real int8 export) falls back to the next model', async () => {
+  const page = await browser.newPage();
+  const errs = []; page.on('pageerror', e => errs.push(String(e)));
+  await page.goto(base + '/site/index.html?test=1&model=/test/assets/dummy_convint.onnx&fallback=/test/assets/dummy.onnx');
+  await page.waitForFunction(() => window.__modelUsed || /Could not/.test(document.getElementById('modelTxt').textContent), null, { timeout: 30000 });
+  const r = await page.evaluate(() => ({ used: window.__modelUsed, txt: document.getElementById('modelTxt').textContent, ready: !document.getElementById('mainBtn').disabled }));
+  await page.close();
+  assert.deepStrictEqual(errs, []);
+  assert.ok(r.used && r.used.endsWith('/test/assets/dummy.onnx'), JSON.stringify(r));
+  assert.ok(r.ready);
+});
