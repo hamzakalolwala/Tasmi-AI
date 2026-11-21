@@ -1,45 +1,43 @@
-# Tasmi AI (e-Muhaffiz) — notes for Claude Code
+# Tasmi AI — notes for Claude Code
 
-A phone web app that listens to Hamza's Quran tasmi (hifz recitation), stops him on mistakes and says the right word,
-and notes tajweed slips. Live at https://hamzakalolwala.github.io/Tasmi-AI/ (served from the `gh-pages` branch;
-`main` holds the source and tests).
+A phone web app that listens to Hamza's Quran tasmi (hifz recitation), stops him on a wrong or skipped word and says
+the right word, then keeps listening. Live at https://hamzakalolwala.github.io/Tasmi-AI/ (served from `gh-pages`;
+`main` holds the source and tests). Open in Chrome.
+
+History: v2 used the HisnLabs Tajweed v2 model (in-browser ONNX) for tajweed checks; Hamza asked to remove it (too much
+latency and errors on device). It lives in git history before the "Remove the tajweed model" commit.
 
 ## How it works
-- `site/audio.js` — mic at 16 kHz (AudioWorklet) + `Vad`: splits audio into breaths at pauses ≥ 0.65 s.
-- `site/hear-worker.js` — Web Worker: `mel.js` (Whisper 80-bin log-mel, matches faster-whisper) → onnxruntime-web →
-  HisnLabs Tajweed v2 (`onnx/model-int8.onnx`, fetched from Hugging Face on first use, cached in Cache Storage) →
-  CTC best path → phonetic script (Quran phonetic alphabet, `site/vocab.json`).
-- `site/engine.js` — pure logic, runs in node too:
-  - `buildRef` joins precomputed word pieces (`site/data/N.json`: forms m/s/e/x per word = middle / breath start /
-    breath end / alone) into the expected script + tajweed units of any breath.
-  - `locate` finds which words a breath covered (may start up to an ayah back, never ahead).
-  - `listen` judges per word: skipped-word hypothesis test first, then madd/ghunnah/ikhfa/iqlab/idgham/qalqalah/shadda
-    units, then clear mistakes (letter/vowel/dropped/added) from Levenshtein opcodes. Clear mistakes need model
-    confidence ≥ 0.7. Logic follows HisnLabs' imam.py (Apache-2.0), rewritten — their repo code is not run here.
-- `site/app.js` — UI/session: per breath → locate → listen → stop on first jali (or khafi if "also stop for tajweed")
-  → speak the word (speechSynthesis, ar-SA) with the mic paused → resume automatically. `?test=1` exposes `window.__app`
-  and lets tests script what the model hears via `window.__hear`.
-- `site/divisions.json` — Madani 604-page mushaf: first/last global ayah id of every page, rub' al-hizb (240) and juz
-  (30), from quran-meta (`scripts/divisions.mjs`). Ruba = ¼ para = 2 rub' al-hizb; nisf = ½ para = 4. The app's
-  "Listen by" selector builds a passage from these, across surahs if needed (`S` is then a list of ayat from several
-  surahs, each with `sn`/`an`). Basmala / isti'adha breaths are recognised and ignored (`isPreamble`).
-- Cache busting: bump `V` in index.html (`TASMI_V`) on every deploy — scripts, worker and data are loaded with `?v=`.
-- Model: tries `model-int8.onnx`, falls back to `model-fp32.onnx` (onnxruntime-web has no ConvInteger kernel).
-- `scripts/precompute.py` — regenerates `site/data` with `quran-transcript` (pip). Checks joined pieces against the
-  phonetizer on random breaths (0 mismatches in 20k).
+- Listening: the browser's Web Speech API (`ar-SA`), `continuous=false` + interim results, restarted after every
+  phrase (`makeListener` in `site/app.js`). A stop bumps an epoch so late results from before the stop are ignored.
+- `site/recite.js` — pure word engine (runs in node):
+  - `norm` spelling skeleton (no harakat, one alef form, ة→ه, hamza seats, no long alef after the first letter);
+    `same` allows 1 slipped letter (2 for words of 10+ letters) — يعلمون/يعملون is a mistake.
+  - `tokens` one token per spoken word (a mushaf word may be 2 spoken words: يَٰٓأَيُّهَا = يا أيها); huroof
+    muqatta'at are free (may be said as letter names, or not recognised at all).
+  - `assess` aligns heard words to the passage from `pos`, allowing a start up to the ayah start (min 6 words) back,
+    never ahead — so skipped words are missing, and restarting an ayah after a correction is fine.
+  - `decide`: stop on the first wrong/skipped word — on interim results once 2 later words were heard correctly
+    (low latency), on a final result immediately; unmatched words at the end of a final phrase = wrong next word
+    unless they repeat recent words. Otherwise commit and move `pos` on.
+  - `withoutPreamble` / `isPreamble`: basmala, isti'adha, "sadaqallahul azim" are ignored (not in al-Fatiha, where
+    the basmala is ayah 1).
+- `site/app.js` — UI: "Listen by" safha / ruba / nisf / para / one ayah / ayah range (Madani 604-page mushaf,
+  `site/divisions.json` from quran-meta via `scripts/divisions.mjs`; ruba = ¼ para = 2 rub' al-hizb, nisf = ½ para);
+  passages may cross surahs (`S` = ayat with `sn`/`an`). On a mistake: card + speechSynthesis (ar-SA) with the
+  recogniser stopped, then it restarts by itself. Self-check mode needs no mic. `?test=1` exposes `window.__app`.
+- `site/words/N.json` — per ayah `{d: display words (Tanzil Uthmani), i: imla'i spelling per word (string, or array
+  when it splits)}`, generated by `scripts/words.py` from quran-transcript + quran-json.
+- Cache busting: bump `V` in index.html (`TASMI_V`, and the `?v=` on the script tags) on every deploy.
 
-## Tests (63, all passing)
-`npm install` then `node --test test/*.test.js`. Browser tests use Playwright with `/usr/bin/google-chrome`
-(adjust `executablePath` in `test/*.test.js` for your machine). Suites: engine (rules, parity with phonetizer fixtures),
-mel (vs faster-whisper), vad, stress (random mistakes across all 114 surahs; noisy-model false stops), browser
-(worker + ORT parity with a stand-in ONNX; fake-mic end to end), app (scenarios incl. mistake mid-ayah, restart ayah,
-skipped word, tajweed slip, isti'adha ignored, summary).
+## Tests (31, all passing)
+`node --test test/*.test.js`. `recite.test.js` is plain node (incl. stress over all 114 surahs). `app.test.js` uses
+Playwright + Chrome with a fake SpeechRecognition that emits interim words then a final phrase like Chrome does
+(set `PLAYWRIGHT` / `CHROME` env vars for your machine; defaults are the build sandbox's paths).
 
 ## Not yet verified
-The real model has never been run in a test (Hugging Face was unreachable from the build sandbox). First real-device
-check: open the live site in Chrome on Android, recite, and use "What the model heard → Copy log" to debug.
-Known limits: no tafkhim/tarqiq (sifat heads aren't in the ONNX export); ~4–9% of correct words may get a remark
-(model card figure).
+Real Arabic speech recognition on Hamza's phone/Mac — how Chrome transcribes recitation (tajweed elongations,
+muqatta'at). If it stops on words he said right, look at "What was heard → Copy log" and tune `same` / `norm`.
 
 ## Deploy
-Copy `site/` to the root of the `gh-pages` branch and push; GitHub Pages rebuilds in ~1 min.
+Copy `site/` to the root of the `gh-pages` branch (delete files no longer in `site/`) and push; Pages rebuilds in ~1 min.

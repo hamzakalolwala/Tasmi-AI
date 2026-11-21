@@ -1,5 +1,5 @@
 {
-  "name": "work",
+  "name": "tasmi-ai",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -12,9 +12,5 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "dependencies": {
-    "@fontsource/amiri-quran": "^5.3.0",
-    "@fontsource/inter": "^5.3.0",
-    "onnxruntime-web": "^1.22.0"
-  }
+  "dependencies": {}
 }
