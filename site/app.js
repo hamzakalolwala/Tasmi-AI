@@ -359,6 +359,7 @@
 
   // ---------- start ----------
   (async () => {
+    try { if (window.caches) caches.delete('emuhaffiz-tajweed-v2'); } catch (e) { /* the old tajweed model's download */ }
     [SURAHS, DIV] = await Promise.all([fetch('surahs.json?v=' + VER).then(r => r.json()), fetch('divisions.json?v=' + VER).then(r => r.json())]);
     START = [0, 1]; for (let n = 1; n < 114; n++) START.push(START[n] + SURAHS[n - 1][3]);
     $('surah').innerHTML = SURAHS.map(s => `<option value="${s[0]}">${s[0]}. ${s[2]} · ${s[1]}</option>`).join('');
