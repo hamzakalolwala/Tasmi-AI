@@ -91,11 +91,12 @@ test('THE BUG: a wrong word mid-ayah stops right there, while still reciting —
   const r = await p.evaluate(async () => {
     await recite(sp(0, 1));                                                // الم
     const s = wi(2, 2), e = wi(2, 3), w = sp(s, e).split(' '); w[3] = 'شك';  // لا شك فيه instead of لا ريب فيه
-    const res = await recite(w.join(' ') + ' ' + sp(e, e + 3), { final: false });
-    return { s, res };
+    await recite(w.join(' ') + ' ' + sp(e, e + 3), { final: false });
+    await new Promise(r => setTimeout(r, 1000));            // the wrong word held (Chrome did not rewrite it)
+    return { s, stoppedBeforeFinal: __app.stop != null && __spoken.length === 1 };
   });
   const s1 = await state(p);
-  assert.strictEqual(r.res, 'stopped', 'stopped before the phrase ended');
+  assert.strictEqual(r.stoppedBeforeFinal, true, 'stopped before the phrase ended');
   assert.strictEqual(s1.stop, r.s + 3);
   assert.strictEqual(s1.pos, r.s + 3, 'continues from the wrong word');
   assert.strictEqual(s1.st[r.s + 3], 'wr');
@@ -138,6 +139,7 @@ test('a late result from before the stop is ignored', async () => {
     const w = sp(0, 8).split(' '); w[2] = 'الذين';
     const old = window.__sr;
     await recite(w.join(' '), { final: false });
+    await new Promise(r => setTimeout(r, 1000));
     const pos = __app.pos;
     old.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: sp(0, 12) }], { isFinal: true })] });   // stale
     await new Promise(r => setTimeout(r, 100));
@@ -364,5 +366,20 @@ test('a surah that fails to load shows a message instead of breaking', async () 
   assert.match(r.note, /Could not load/);
   assert.strictEqual(r.sn, 112, 'the old passage is still usable');
   assert.deepStrictEqual(p.errs, []);
+  await p.close();
+});
+
+test('a wrong interim guess that Chrome rewrites a moment later is not a mistake', async () => {
+  const p = await open({ unit: 'range', surah: 67, from: 1, to: 2 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    const sr = await (async () => { for (let i = 0; i < 100 && !window.__sr; i++) await new Promise(r => setTimeout(r, 10)); return window.__sr; })();
+    const w = sp(0, 9).split(' '), bad = [...w]; bad[2] = 'الذين';
+    for (let i = 1; i <= 9; i++) { sr.emit(bad.slice(0, i).join(' '), false); await new Promise(r => setTimeout(r, 60)); }   // wrong guess held ~0.4s
+    sr.emit(w.join(' '), false); await new Promise(r => setTimeout(r, 900));                                                // …then corrected
+    sr.emit(w.join(' '), true); await new Promise(r => setTimeout(r, 150));
+    return { spoken: __spoken.length, pos: __app.pos };
+  });
+  assert.deepStrictEqual(r, { spoken: 0, pos: 9 });
   await p.close();
 });

@@ -26,11 +26,11 @@ test('THE BUG: wrong word in the middle of an ayah → stop on that word (not th
   const h = spoken(P, s, s + 7).split(' '); h[3] = 'شك';               // لا شك instead of لا ريب
   assert.deepStrictEqual(step(P, s, h.join(' ')), { stop: s + 3, kind: 'wr', heard: 'شك' });
 });
-test('…and caught early, while still reciting, once two more words are heard', () => {
+test('…and caught early, while still reciting, once three more words are heard', () => {
   const P = passageOf(2, 1, 5), s = ayahStart(P, 2);
-  const h = spoken(P, s, s + 7).split(' '); h[3] = 'شك';
-  assert.deepStrictEqual(step(P, s, h.slice(0, 5).join(' '), false), { none: true });      // only one word after it
-  assert.strictEqual(step(P, s, h.slice(0, 6).join(' '), false).stop, s + 3);              // two words after it
+  const h = spoken(P, s, s + 9).split(' '); h[3] = 'شك';
+  assert.deepStrictEqual(step(P, s, h.slice(0, 6).join(' '), false), { none: true });      // two words after it: Chrome may still rewrite
+  assert.strictEqual(step(P, s, h.slice(0, 7).join(' '), false).stop, s + 3);              // three words after it
 });
 test('after a correction, carrying on from the corrected word works', () => {
   const P = passageOf(2, 1, 5), s = ayahStart(P, 2), e = ayahStart(P, 3);
@@ -118,4 +118,29 @@ test('a different word that looks similar is a mistake (بالقلب for بال�
   assert.strictEqual(step(P, 0, 'الذين يؤمنون بالقلب ويقيمون الصلاة ومما رزقناهم ينفقون').stop, 2);
   assert.strictEqual(R.same(R.norm('يعلمون'), R.norm('يعملون')), false);
   assert.strictEqual(R.same(R.norm('الصلاه'), R.norm('الصلوة')), true);   // spelling only
+});
+
+// ---------- what speech recognition really writes: none of this is a mistake ----------
+const ok = (P, heard, commit) => assert.deepStrictEqual(step(P, 0, heard), { commit }, heard);
+test('a held madd (الرحيييم) is the same word', () => ok(passageOf(1, 1, 1), 'بسم الله الرحمن الرحيييم', 4));
+test('filler sounds (آآ، امم) are ignored', () => {
+  ok(passageOf(112, 1, 1), 'قل هو آآ الله أحد', 4);
+  ok(passageOf(112, 1, 1), 'قل هو الله أحد امم', 4);
+});
+test('a detached و (و قال) and a word merged with the next one (وماأدراك) still match', () => {
+  ok(passageOf(77, 8, 9), 'فإذا النجوم طمست و إذا السماء فرجت', 6);
+  ok(passageOf(101, 3, 3), 'وماأدراك ما القارعة', 4);
+});
+test('digits written for a number word match it', () => ok(passageOf(112, 1, 1), 'قل هو الله ١', 4));
+test('saying a few words twice in a row is not a mistake', () => ok(passageOf(93, 9, 9), 'فأما اليتيم فلا تقهر فلا تقهر', 4));
+test('…but a passage that itself repeats words still needs both copies', () => {
+  const P = passageOf(94, 5, 6);
+  ok(P, spoken(P, 0, P.passage.length), P.passage.length);
+});
+test('real mistakes stay mistakes: عن/إن, قل/كل, a different word with the same letters', () => {
+  assert.strictEqual(R.same(R.norm('عن'), R.norm('إن')), false);
+  assert.strictEqual(R.same(R.norm('قل'), R.norm('كل')), false);
+  assert.strictEqual(R.same(R.norm('يعلمون'), R.norm('يعملون')), false);
+  const P = passageOf(112, 1, 1);
+  assert.strictEqual(step(P, 0, 'كل هو الله أحد').stop, 0);
 });

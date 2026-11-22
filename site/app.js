@@ -238,7 +238,8 @@
   });
 
   // ---------- each time words come in: where are we, and is anything wrong? ----------
-  let thinkQ = 0;
+  let thinkQ = 0, pending = null, pendingT = 0;
+  const HOLD = TEST && params.has('hold') ? +params.get('hold') : 800;   // ms an interim mistake must hold before stopping
   function thinkSoon() { if (thinkQ) return; thinkQ = requestAnimationFrame(() => { thinkQ = 0; if (interim) think(false); }); }
   function think(final) {
     if (final && thinkQ) { cancelAnimationFrame(thinkQ); thinkQ = 0; }
@@ -255,7 +256,14 @@
     const res = Recite.assess(T, passage, pos, text);
     const d = Recite.decide(res, passage, T, final);
     live = res && res.frontier >= res.a ? res : null;
-    if (d.stop != null) return correct(res, d, text);
+    if (d.stop != null) {
+      // Chrome rewrites its interim guesses: stop on an interim result only once the same mistake has held for a moment
+      if (final) { pending = null; return correct(res, d, text); }
+      const key = d.stop + '|' + d.kind + '|' + d.heard, now = Date.now();
+      if (!pending || pending.key !== key) { pending = { key, since: now }; clearTimeout(pendingT); pendingT = setTimeout(() => { if (pending && pending.key === key && interim && !muted) think(false); }, HOLD + 30); }
+      else if (now - pending.since >= HOLD) { pending = null; return correct(res, d, text); }
+    } else if (!final) pending = null;
+    if (final) pending = null;
     if (final) {
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
       if (d.commit != null) {
