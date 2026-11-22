@@ -3,10 +3,13 @@ package ai.tasmi.app;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
@@ -15,9 +18,15 @@ import android.speech.SpeechRecognizer;
 import java.util.ArrayList;
 
 /**
- * Keeps the microphone on for a whole recitation. Android's recogniser stops after every phrase, so listening is
- * started again at once on the same recogniser, with the start/stop beep muted; to the page it looks like one
- * continuous session. All methods run on the main thread.
+ * Keeps listening for a whole recitation — through the breaths between ayat — until the reciter taps Stop.
+ *
+ * Three ways, best first; it steps down by itself if the phone's recogniser can't do one:
+ *  STREAM    (Android 13+) the app records the microphone itself without a break ({@link Mic}) and streams it into
+ *            one long recogniser session, which reports each phrase as it ends; if the session ever restarts, the
+ *            audio it missed is replayed, so nothing is lost.
+ *  SEGMENTED (Android 13+) one long recogniser session on the recogniser's own microphone.
+ *  RESTART   the recogniser stops after every phrase and is started again at once (a short gap; the beep muted).
+ * All methods run on the main thread.
  */
 final class Listener {
     interface Events {
@@ -25,10 +34,18 @@ final class Listener {
         void fin(String text);
         /** the session is over: error is a browser-style code ("not-allowed", "network", "no-speech"…) or null */
         void ended(String error);
+        /** which way it is listening (for the troubleshooting log) */
+        void mode(String mode, String why);
+        /** the microphone was off for a moment (RESTART only): a word said just then may be missing */
+        void gap();
     }
 
+    static final int STREAM = 0, SEGMENTED = 1, RESTART = 2;
+    private static final String[] NAMES = {"stream", "segmented", "restart"};
+
     private static final long QUIET_MS = 45_000;       // nothing heard for this long: end the session (the page pauses)
-    private static final long STUCK_MS = 15_000;       // no callback at all for this long: the recogniser hung
+    private static final long STUCK_MS = 15_000;       // RESTART: no callback at all for this long — the recogniser hung
+    private static final long LONG_SESSION_MS = 10 * 60_000;
     private static final int[] BACKOFF = {0, 250, 700, 1500, 3000, 5000};
     private static final String PREFS = "tasmi", MUTED = "musicMuted";
 
@@ -37,14 +54,36 @@ final class Listener {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AudioManager audio;
     private final SharedPreferences prefs;
+    private final Mic mic = new Mic();
     private SpeechRecognizer sr;
     private boolean want, muted;
     private String lang = "ar-SA";
-    private int fails, busy;
-    private long lastSpeech;
+    private int mode = Build.VERSION.SDK_INT >= 33 ? STREAM : RESTART;
+    private boolean modeWorked;                         // the current mode has produced words at least once
+    private int fails, busy, deafTicks;
+    private long lastSpeech, sessionAt, lastWords;
     private String lastPartial = "";
     private int generation;
     private final Runnable stuck = () -> { if (want) { destroy(); open(); } };
+    private final Runnable tick = new Runnable() {     // once a second while listening
+        @Override public void run() {
+            if (!want) return;
+            long now = SystemClock.elapsedRealtime();
+            if (mode == STREAM && mic.quietMs() < 1500) lastSpeech = Math.max(lastSpeech, now - mic.quietMs());
+            if (now - lastSpeech > QUIET_MS) { finish("no-speech"); return; }
+            // STREAM: the mic hears a voice but the recogniser writes nothing — it does not take our audio
+            if (mode == STREAM && !modeWorked && now - sessionAt > 3000 && mic.quietMs() < 1200 && ++deafTicks >= 5) {
+                stepDown("the recogniser heard nothing from the app's microphone");
+                return;
+            }
+            // STREAM: it worked, but now the voice goes on and no words come: the session hung — start a new one
+            // (the audio it missed is replayed into the new one)
+            if (mode == STREAM && modeWorked && mic.quietMs() < 1500 && now - Math.max(lastWords, sessionAt) > 20_000) {
+                destroy(); open();
+            }
+            main.postDelayed(this, 1000);
+        }
+    };
 
     Listener(Context ctx, Events ev) {
         this.ctx = ctx;
@@ -64,7 +103,10 @@ final class Listener {
         busy = 0;
         lastSpeech = SystemClock.elapsedRealtime();
         mute(true);
+        ev.mode(NAMES[mode], "start");
         open();
+        main.removeCallbacks(tick);
+        main.postDelayed(tick, 1000);
     }
 
     /** stop listening; the page already knows (it asked) */
@@ -73,6 +115,7 @@ final class Listener {
         generation++;
         main.removeCallbacksAndMessages(null);
         destroy();
+        mic.stop();
         mute(false);
         lastPartial = "";
     }
@@ -85,6 +128,21 @@ final class Listener {
             try { sr.destroy(); } catch (Exception ignored) { }
             sr = null;
         }
+        mic.endSession();
+    }
+
+    /** this way does not work on this phone: try the next one (for as long as the app runs) */
+    private void stepDown(String why) {
+        if (mode >= RESTART) return;
+        mode++;
+        modeWorked = false;
+        deafTicks = 0;
+        if (mode != STREAM) mic.stop();
+        ev.mode(NAMES[mode], why);
+        destroy();
+        main.post(() -> { if (want) open(); });
+        main.removeCallbacks(tick);
+        main.postDelayed(tick, 1000);
     }
 
     /**
@@ -102,7 +160,7 @@ final class Listener {
         } catch (Exception ignored) { /* Do Not Disturb may refuse; then the beep stays */ }
     }
 
-    private Intent intent() {
+    private Intent intent(ParcelFileDescriptor source) {
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang);
@@ -113,6 +171,17 @@ final class Listener {
         // let a reciter breathe between words without ending the phrase (recognisers may ignore these)
         i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L);
         i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L);
+        if (Build.VERSION.SDK_INT >= 33 && mode == STREAM && source != null) {
+            i.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, source);
+            i.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1);
+            i.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT);
+            i.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, Mic.RATE);
+            // one session for as long as the app streams audio; each phrase arrives as a segment
+            i.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE);
+        } else if (Build.VERSION.SDK_INT >= 33 && mode == SEGMENTED) {
+            i.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS);
+            i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, LONG_SESSION_MS);
+        }
         return i;
     }
 
@@ -120,6 +189,7 @@ final class Listener {
     private void open() {
         if (!want) return;
         destroy();
+        if (mode == STREAM && !mic.running() && !mic.start()) { stepDown("the app could not open the microphone itself"); return; }
         try {
             sr = SpeechRecognizer.createSpeechRecognizer(ctx);
         } catch (Exception e) {
@@ -129,15 +199,18 @@ final class Listener {
         listen();
     }
 
-    /** listen for the next phrase on the same recogniser: much quicker than making a new one, so no words are lost */
+    /** listen for the next phrase (RESTART) or the next long session, on the same recogniser */
     private void listen() {
         if (!want || sr == null) return;
         final int gen = ++generation;
+        final int myMode = mode;
         lastPartial = "";
+        sessionAt = SystemClock.elapsedRealtime();
+        deafTicks = 0;
         sr.setRecognitionListener(new RecognitionListener() {
             private boolean current() {
-                if (gen != generation || !want) return false;
-                main.removeCallbacks(stuck); main.postDelayed(stuck, STUCK_MS);   // still alive
+                if (gen != generation || !want || myMode != mode) return false;
+                if (mode == RESTART) { main.removeCallbacks(stuck); main.postDelayed(stuck, STUCK_MS); }   // still alive
                 return true;
             }
             @Override public void onReadyForSpeech(Bundle b) { if (current()) busy = 0; }
@@ -152,9 +225,25 @@ final class Listener {
                 String t = first(b);
                 if (t.isEmpty() || t.equals(lastPartial)) return;
                 lastPartial = t;
-                lastSpeech = SystemClock.elapsedRealtime();
-                fails = 0;
+                heard();
                 ev.partial(t);
+            }
+
+            /** a long session: one phrase is done, the session goes on */
+            @Override public void onSegmentResults(Bundle b) {
+                if (!current()) return;
+                String t = first(b);
+                if (t.isEmpty()) t = lastPartial;
+                lastPartial = "";
+                if (!t.isEmpty()) { heard(); ev.fin(t); }
+            }
+
+            /** a long session ended (time limit, or the audio stream was closed): start the next one */
+            @Override public void onEndOfSegmentedSession() {
+                if (!current()) return;
+                generation++;
+                flushPartial();
+                again(0, false);
             }
 
             @Override public void onResults(Bundle b) {
@@ -163,15 +252,21 @@ final class Listener {
                 String t = first(b);
                 if (t.isEmpty()) t = lastPartial;           // some recognisers end with an empty final
                 lastPartial = "";
-                if (!t.isEmpty()) { lastSpeech = SystemClock.elapsedRealtime(); fails = 0; ev.fin(t); }
+                if (!t.isEmpty()) { heard(); ev.fin(t); }
                 again(0, false);
             }
 
             @Override public void onError(int code) {
                 if (!current()) return;
                 generation++;
-                // words heard but never finalised: pass them on as final
-                if (!lastPartial.isEmpty()) { ev.fin(lastPartial); lastPartial = ""; fails = 0; }
+                flushPartial();
+                // a long-session mode the phone's recogniser can't do: it fails before it ever heard a word
+                if (mode != RESTART && !modeWorked && SystemClock.elapsedRealtime() - sessionAt < 4000
+                        && code != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS && code != SpeechRecognizer.ERROR_NETWORK
+                        && code != SpeechRecognizer.ERROR_NETWORK_TIMEOUT) {
+                    stepDown("recogniser error " + code + " in " + NAMES[mode] + " mode");
+                    return;
+                }
                 switch (code) {
                     case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
                         finish("not-allowed");
@@ -207,20 +302,33 @@ final class Listener {
                 }
             }
         });
-        main.removeCallbacks(stuck);
-        main.postDelayed(stuck, STUCK_MS);
+        if (mode == RESTART) { main.removeCallbacks(stuck); main.postDelayed(stuck, STUCK_MS); }
         try {
-            sr.startListening(intent());
+            ParcelFileDescriptor source = mode == STREAM ? mic.newSession() : null;
+            sr.startListening(intent(source));
         } catch (Exception e) {
+            if (mode != RESTART && !modeWorked) { stepDown("could not start " + NAMES[mode] + " mode"); return; }
             busy++;
             if (busy > 12) finish("error"); else again(600, true);
         }
+    }
+
+    private void heard() {
+        lastSpeech = lastWords = SystemClock.elapsedRealtime();
+        fails = 0;
+        if (!modeWorked) { modeWorked = true; ev.mode(NAMES[mode], "working"); }
+    }
+
+    /** words heard but never finalised: pass them on as final */
+    private void flushPartial() {
+        if (!lastPartial.isEmpty()) { ev.fin(lastPartial); lastPartial = ""; fails = 0; }
     }
 
     /** listen again after the phrase (or after a hiccup); a long silence ends the session instead */
     private void again(long delay, boolean fresh) {
         if (!want) return;
         if (SystemClock.elapsedRealtime() - lastSpeech > QUIET_MS) { finish("no-speech"); return; }
+        if (mode == RESTART) ev.gap();
         final int gen = generation;
         main.postDelayed(() -> {
             if (!want || gen != generation) return;
@@ -234,6 +342,7 @@ final class Listener {
         generation++;
         main.removeCallbacksAndMessages(null);
         destroy();
+        mic.stop();
         mute(false);
         ev.ended(error);
     }

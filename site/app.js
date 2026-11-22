@@ -124,7 +124,7 @@
   function makeListener() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
-    let want = false, rec = null, epoch = 0, fails = 0, timer = 0, dog = 0, quietSince = 0;
+    let want = false, rec = null, epoch = 0, fails = 0, timer = 0, dog = 0, quietSince = 0, first = true;
     const h = { f: [], p: [], s: [] }, emit = (k, e) => h[k].forEach(fn => fn(e));
     const FATAL = { 'not-allowed': 'not_granted', 'service-not-allowed': 'not_granted', 'language-not-supported': 'unavailable' };
     const BACKOFF = [0, 200, 600, 1200, 2500, 4000];   // ms before restarting after 0, 1, 2… failed sessions in a row
@@ -133,6 +133,8 @@
     function giveUp(reason) { want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason }); }
     function open() {
       const my = ++epoch;
+      gapAt = Date.now();                       // (re)opening the microphone: words said just now may not be recorded
+      first = false;
       let gotResult = false, err = null, lastPar = '';
       const done = [];            // result indexes already passed on as final
       let said = '';              // everything passed on as final in this session (Android repeats it in later results)
@@ -189,16 +191,19 @@
     return {
       start() {
         if (want) return;
-        want = true; fails = 0; quietSince = Date.now();
+        want = true; fails = 0; quietSince = Date.now(); first = true;
         try { open(); } catch (e) { giveUp('error'); return false; }
         emit('s', { state: 'listening' }); return true;
       },
       stop() { const was = want || rec; want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } if (was) emit('s', { state: 'idle', reason: 'stopped' }); },
       get on() { return want; },
+      get gapAt() { return Math.max(gapAt, window.__tasmiGapAt || 0); },
       onFinal(fn) { h.f.push(fn); }, onPartial(fn) { h.p.push(fn); }, onState(fn) { h.s.push(fn); },
     };
   }
   const QUIET = TEST && params.has('quiet') ? +params.get('quiet') : 40000;   // ms of silence before listening pauses
+  let gapAt = 0, phraseAt = 0;
+  window.__tasmiMode = (m, why) => addLog({ heard: '', result: `listening mode: ${m} (${why})` });
   let L = null, wantListen = false, sayToken = 0, wake = null, hiddenWhileListening = false;
   const NOTES = {
     not_granted: 'Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap <b>Continue</b>.',
@@ -224,8 +229,8 @@
     if (!L) {
       L = makeListener();
       if (!L) { note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.'); return; }
-      L.onPartial(t => { if (!muted) { interim = t; if (t) thinkSoon(); else render(); } });
-      L.onFinal(t => { if (!muted) { heardFinal += ' ' + t; interim = ''; think(true); } });
+      L.onPartial(t => { if (!muted) { if (t && !interim && !heardFinal.trim()) phraseAt = Date.now(); interim = t; if (t) thinkSoon(); else render(); } });
+      L.onFinal(t => { if (!muted) { if (!interim && !heardFinal.trim()) phraseAt = Date.now(); heardFinal += ' ' + t; interim = ''; think(true); } });
       L.onState(({ state, reason }) => {
         if (muted) return;
         if (state === 'retrying') note(RETRY[reason] || RETRY.error, true);
@@ -276,7 +281,9 @@
       return;
     }
     const res = Recite.assess(T, passage, pos, text);
-    const d = Recite.decide(res, passage, T, final);
+    // a phrase that began just after a microphone restart may have lost its first word: not a skip
+    const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500);
+    const d = Recite.decide(res, passage, T, final, { softStart });
     live = res && res.frontier >= res.a ? res : null;
     if (d.stop != null) {
       // Chrome rewrites its interim guesses: stop on an interim result only once the same mistake has held for a moment
@@ -290,6 +297,7 @@
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
       if (d.commit != null) {
         for (let i = pos; i < d.commit; i++) mark(i, 'ok');   // only new words: earlier ones keep what they were
+        if (d.soft != null) entry.note = `${wordName(d.soft)} not heard just after a mic restart — not counted as skipped`;
         pos = Math.max(pos, d.commit); entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
         hideStop();
         if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
@@ -391,7 +399,7 @@
   function addLog(e) {
     e.t = new Date().toLocaleTimeString(); log.push(e); if (log.length > 200) log.shift();
     if (TEST) window.__log = log;
-    $('log').textContent = `${e.t}  ${e.at ? 'words ' + e.at + '  ' : ''}${e.result}\nheard: ${e.heard}\n\n` + $('log').textContent.slice(0, 20000);
+    $('log').textContent = `${e.t}  ${e.at ? 'words ' + e.at + '  ' : ''}${e.result}${e.note ? '\nnote: ' + e.note : ''}\nheard: ${e.heard}\n\n` + $('log').textContent.slice(0, 20000);
   }
 
   // ---------- word sheet & summary ----------

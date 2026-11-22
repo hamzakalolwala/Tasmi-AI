@@ -155,13 +155,19 @@
 
   /** What does the muhaffiz do?  final: the recogniser has settled this phrase.
    *  {stop: wi, kind: 'wr'|'ms', heard} to correct the reciter, or {commit: nextPos} to move on, or {none: true}. */
-  function decide(res, passage, T, final) {
+  /** opts.softStart: the phrase began just after the microphone was off for a moment (a restart), so a missing
+   *  first word may simply not have been recorded — not a skip, if the words after it are right */
+  function decide(res, passage, T, final, opts) {
     if (!res) return { none: true };
+    let soft = null;
     const { a, frontier, status } = res, from = Math.max(a, res.pos != null ? res.pos : a);
     // words before pos were already judged: going back over them (repeating, restarting the ayah) never stops on them
     for (let wi = from; wi <= frontier; wi++) {
       const st = status[wi];
       if (st !== 'wr' && st !== 'ms') continue;
+      // up to 2 words missing at the very start of the phrase, the next word heard right: lost in the gap
+      if (opts && opts.softStart && st === 'ms' && wi <= from + 1 && (wi === from || status[from] === 'ms' || soft === from)
+          && (status[wi + 1] === 'ok' || (wi === from && status[wi + 1] === 'ms' && status[wi + 2] === 'ok'))) { soft = soft == null ? wi : soft; continue; }
       // while words are still coming in, only stop once three later words were heard correctly after it
       // (Chrome rewrites its guesses), and leave a skipped 1–2 letter word (في، ما، من) to the final result
       if (!final) { let okAfter = 0; for (let x = wi + 1; x <= frontier; x++) if (status[x] === 'ok') okAfter++; if (okAfter < 3 || (st === 'ms' && T.filter(t => t.wi === wi).every(t => t.k.length <= 2))) return { none: true }; }
@@ -174,7 +180,7 @@
       if (!nextFree && !res.trail.some(x => recent.some(k => same(x.k, k))))
         return { stop: frontier + 1, kind: 'wr', heard: res.trail.map(x => x.raw).join(' ') };
     }
-    if (final) return frontier >= a ? { commit: frontier + 1 } : { none: true };
+    if (final) return frontier >= a ? (soft != null ? { commit: frontier + 1, soft } : { commit: frontier + 1 }) : { none: true };
     return { none: true };
   }
 

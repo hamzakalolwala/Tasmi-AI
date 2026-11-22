@@ -3,9 +3,15 @@
 The same page as the website (`site/`, bundled as the app's assets) in a WebView, with Android's own speech
 recognition and Arabic text-to-speech instead of Chrome's:
 
-- `Listener.java` keeps the microphone on for the whole recitation: Android's recogniser stops after every phrase, so
-  it is restarted at once with the start/stop beep muted (music/notification/system streams are muted only while
-  listening, and restored on stop, before the correction is spoken, and when the app is left).
+- `Listener.java` keeps listening through the breaths between ayat, best way first, stepping down by itself:
+  - STREAM (Android 13+): `Mic.java` records the microphone itself without a break and streams it into one long
+    segmented recogniser session (`EXTRA_AUDIO_SOURCE` + `EXTRA_SEGMENTED_SESSION`); a new session gets the last
+    seconds it missed replayed, so nothing is lost. Steps down if the recogniser errors at once or writes nothing
+    while the mic hears a voice.
+  - SEGMENTED (Android 13+): one long session on the recogniser's own mic.
+  - RESTART: the recogniser restarted after every phrase (short gap; the media stream is muted while listening so
+    its beep isn't heard, and restored on stop, before the correction is spoken, and when the app is left).
+  The mode in use is written to the page's log ("listening mode: …").
 - `MainActivity.java` — WebView (`WebViewAssetLoader`, https://appassets.androidplatform.net/assets/index.html),
   `TasmiNative` bridge (listen, speak, copy), mic permission, screen kept on while listening, stops when left.
 - `site/native.js` makes the bridge look like the browser's `SpeechRecognition` / `speechSynthesis`, so `app.js`

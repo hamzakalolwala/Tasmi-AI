@@ -163,3 +163,15 @@ test('every ayah of the whole Quran, recited correctly, is never stopped (final 
   }
   assert.deepStrictEqual(bad, []);
 });
+
+test('just after a microphone restart, 1–2 missing words at the start of the phrase are not a skip — anything else still is', () => {
+  const P = passageOf(2, 2, 5), s = ayahStart(P, 4), e = ayahStart(P, 5), w = spoken(P, s, e).split(' ');
+  const soft = (heard, opts) => R.decide(R.assess(P.T, P.passage, s, heard), P.passage, P.T, true, opts);
+  assert.deepStrictEqual(soft(w.slice(1).join(' '), { softStart: true }), { commit: e, soft: s });       // first word lost
+  assert.deepStrictEqual(soft(w.slice(2).join(' '), { softStart: true }), { commit: e, soft: s });       // two lost
+  assert.strictEqual(soft(w.slice(1).join(' ')).stop, s, 'no restart just before: a real skip');
+  const mid = [...w]; mid.splice(4, 1);
+  assert.strictEqual(soft(mid.join(' '), { softStart: true }).stop, s + 4, 'a skip later in the phrase is still a skip');
+  const wrong = [...w]; wrong[0] = 'والكتاب';
+  assert.strictEqual(soft(wrong.join(' '), { softStart: true }).stop, s, 'a wrong first word is still wrong');
+});

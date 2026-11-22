@@ -75,6 +75,8 @@
         case 'final': if (active) active._final(ev.text); break;
         case 'error': if (active) { const a = active; a._end(ev.error); } break;   // the session is over (app.js restarts it or gives up)
         case 'end': if (active) active._end(null); break;
+        case 'gap': window.__tasmiGapAt = Date.now(); break;          // Android's recogniser restarted: the mic was off a moment
+        case 'mode': if (window.__tasmiMode) window.__tasmiMode(ev.mode, ev.why); break;
         case 'ttsDone': done(ev.id, 'end'); break;
         case 'ttsError': done(ev.id, 'error'); break;
         case 'voices': (listeners.voiceschanged || []).forEach(fn => fn()); break;

@@ -67,6 +67,16 @@ public class MainActivity extends Activity {
         listener = new Listener(this, new Listener.Events() {
             @Override public void partial(String t) { send("partial", "text", t); }
             @Override public void fin(String t) { send("final", "text", t); }
+            @Override public void mode(String mode, String why) {
+                runOnUiThread(() -> {
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject();
+                        o.put("type", "mode"); o.put("mode", mode); o.put("why", why);
+                        web.evaluateJavascript("window.__tasmiNative && window.__tasmiNative.onEvent(" + o + ")", null);
+                    } catch (Exception ignored) { }
+                });
+            }
+            @Override public void gap() { send("gap", null, null); }
             @Override public void ended(String error) {
                 keepScreenOn(false);
                 if (error == null) send("end", null, null); else send("error", "error", error);

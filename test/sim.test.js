@@ -14,15 +14,15 @@ test.before(async () => {
 test.after(async () => { await browser?.close(); srv?.close(); });
 
 // one microphone, one speaker; a recogniser session hears it only while it is running
-const SIM = flavour => {
-  const T = { word: 60, endpoint: 350, silence: 2500 };    // ms: between words, pause that ends a phrase, silence that ends a session
+const SIM = (flavour, opt = {}) => {
+  const T = { word: 60, endpoint: 350, silence: opt.silence || 2500, ready: opt.ready || 0 };    // ms: between words, pause that ends a phrase, silence that ends a session
   const sim = window.__sim = { starts: 0, flavour, sessions: [], heardWhileOff: 0, T };
   let active = null;
   class FakeSR {
     constructor() { this.continuous = false; this.interimResults = false; this.lang = ''; }
     start() {
       if (active) throw Object.assign(new Error('already started'), { name: 'InvalidStateError' });
-      sim.starts++; active = this; this.res = []; this.cur = null; this.quietSince = Date.now(); this.alive = true;
+      sim.starts++; active = this; this.res = []; this.cur = null; this.quietSince = Date.now(); this.alive = true; this.startedAt = Date.now();
       sim.sessions.push({ continuous: this.continuous });
       this.tick = setInterval(() => {          // ends the session after silence (and after one phrase if not continuous)
         if (!this.alive || this.cur) return;
@@ -41,6 +41,7 @@ const SIM = flavour => {
       this.onresult && this.onresult({ resultIndex: Math.max(0, this.res.findIndex(r => !r.f)), results: list });
     }
     word(w) {                                    // the reciter says one word
+      if (Date.now() - this.startedAt < T.ready) { sim.heardWhileOff++; return; }   // not listening yet
       this.quietSince = Date.now();
       if (!this.cur) { this.cur = { t: '', f: false }; this.res.push(this.cur); }
       this.cur.t = (this.cur.t + ' ' + w).trim();
@@ -65,6 +66,8 @@ const SIM = flavour => {
   window.__spoken = [];
   const wait = ms => new Promise(r => setTimeout(r, ms));
   /** the reciter recites phrases (arrays of words) with natural pauses, whatever the app is doing */
+  window.__word = w => { if (active) active.word(w); else sim.heardWhileOff++; };
+  window.__endpoint = () => { if (active) active.pause(); };
   window.reciteAll = async phrases => {
     for (const ph of phrases) {
       for (const w of ph) { if (active) active.word(w); else sim.heardWhileOff++; await wait(T.word); }
@@ -77,11 +80,11 @@ const SIM = flavour => {
   };
 };
 
-async function open(flavour, set) {
+async function open(flavour, set, opt) {
   const page = await browser.newPage();
   const errs = []; page.on('pageerror', e => errs.push(String(e))); page.errs = errs;
   await page.addInitScript(() => { try { if (!sessionStorage.__cleared) { localStorage.clear(); sessionStorage.__cleared = 1; } } catch (e) {} });
-  await page.addInitScript(SIM, flavour);
+  await page.addInitScript({ content: `(${SIM})(${JSON.stringify(flavour)}, ${JSON.stringify(opt || {})});` });
   await page.goto(base + '/site/index.html?test=1&quiet=8000');
   await page.waitForFunction(() => window.__app && window.__app.passage.length > 0);
   await page.evaluate(async set => {
@@ -300,5 +303,28 @@ test('Android app: a long session (260 phrases) — every phrase is still judged
     return { pos: __app.pos, expected: i, spoken: __native.spoken.length };
   });
   assert.deepStrictEqual(r, { pos: r.expected, expected: r.expected, spoken: 0 });
+  await p.close();
+});
+
+test('android: the recogniser stops at every breath and is slow to restart — a first word lost in the gap is not a "skip"', async () => {
+  const p = await open('android', { unit: 'range', surah: 2, from: 2, to: 5 }, { silence: 500, ready: 150 });
+  const r = await p.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const ayat = []; let cur = [], ai = null;
+    for (let i = 0; i < __app.passage.length; i++) { const [x, k] = __app.passage[i]; if (ai !== null && x !== ai) { ayat.push(cur); cur = []; } ai = x; cur.push(...[].concat(__app.S[x].i[k])); }
+    ayat.push(cur);
+    await wait(500);                                  // a person starts a moment after tapping Start
+    for (const a of ayat) {
+      for (const w of a) { __word(w); await wait(200); }   // fast recitation: ~5 words a second
+      await wait(350); __endpoint();                  // the phrase ends…
+      await wait(560);                                // …a short breath: the session ends and restarts while the next ayah begins
+    }
+    await wait(300);
+    return { lost: __sim.heardWhileOff, spoken: __spoken.length, pos: __app.pos, n: __app.passage.length, log: (window.__log || []).map(e => e.note).filter(Boolean), dbg: (window.__log || []).map(e => e.result + ' | ' + e.heard).join('\n') };
+  });
+  assert.ok(r.lost >= 1, 'the simulation really lost words in the gap: ' + r.lost);
+  assert.strictEqual(r.spoken, 0, 'no false "skipped" stop\n' + r.dbg);
+  assert.strictEqual(r.pos, r.n);
+  assert.ok(r.log.length >= 1);
   await p.close();
 });
