@@ -61,26 +61,41 @@
     build();
   }
   const surahCache = {};
+  /** fetch JSON, retrying twice (a flaky phone connection) */
+  async function getJSON(url) {
+    let err;
+    for (let t = 0; t < 3; t++) {
+      try { const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
+      catch (e) { err = e; await new Promise(r => setTimeout(r, 400 * (t + 1))); }
+    }
+    throw err;
+  }
   async function loadSurah(n) {
-    if (!surahCache[n]) surahCache[n] = (await (await fetch(`words/${n}.json?v=${VER}`)).json()).map((a, i) => ({ ...a, sn: n, an: i + 1 }));
-    return surahCache[n];
+    if (!surahCache[n]) surahCache[n] = getJSON(`words/${n}.json?v=${VER}`).then(d => d.map((a, i) => ({ ...a, sn: n, an: i + 1 })));
+    try { return await surahCache[n]; } catch (e) { delete surahCache[n]; throw e; }
   }
   async function build() {
     showSel();
     const { r: [f, l], label } = chosen();
     const [s0, a0] = sa(f), [s1, a1] = sa(l);
     unitLabel = `${label} · ${SURAHS[s0 - 1][2]} ${ayahRef(s0, a0)}` + (f !== l ? ` – ${s1 !== s0 ? SURAHS[s1 - 1][2] + ' ' : ''}${ayahRef(s1, a1)}` : '');
-    $('unitDesc').textContent = unitLabel;
     lsSet('tasmi.sel', { unit: $('unit').value, page: $('page').value, para: $('para').value, ruba: $('ruba').value, nisf: $('nisf').value,
       surah: $('surah').value, ayah: $('ayah').value, from: $('from').value, to: $('to').value });
     const token = (build.token = (build.token || 0) + 1);
     const ayat = [];
-    for (let sn = s0; sn <= s1; sn++) {
-      const data = await loadSurah(sn);
-      for (let an = sn === s0 ? a0 : 1; an <= (sn === s1 ? a1 : data.length); an++) ayat.push(data[an - 1]);
+    try {
+      for (let sn = s0; sn <= s1; sn++) {
+        const data = await loadSurah(sn);
+        for (let an = sn === s0 ? a0 : 1; an <= (sn === s1 ? a1 : data.length); an++) ayat.push(data[an - 1]);
+      }
+    } catch (e) {
+      if (token === build.token) note(`Could not load ${esc(SURAHS[s0 - 1][2])} — check your internet connection and choose it again.`, true);
+      return;
     }
     if (token !== build.token) return;
-    if (listening) stopListening();
+    $('unitDesc').textContent = unitLabel;
+    if ($('note').dataset.err && !listening) note('');
+    if (listening || wantListen) stopListening();
     S = ayat; passage = [];
     S.forEach((a, ai) => a.d.forEach((_, k) => passage.push([ai, k])));
     T = Recite.tokens(S, passage);
@@ -107,61 +122,126 @@
   function makeListener() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
-    let want = false, rec = null, lastErr = null, epoch = 0;
+    let want = false, rec = null, epoch = 0, fails = 0, timer = 0, dog = 0, lastFinal = { t: '', at: 0 };
     const h = { f: [], p: [], s: [] }, emit = (k, e) => h[k].forEach(fn => fn(e));
+    const FATAL = { 'not-allowed': 'not_granted', 'service-not-allowed': 'not_granted', 'language-not-supported': 'unavailable' };
+    const BACKOFF = [60, 60, 300, 1000, 2500, 4000];   // ms before restarting after 0, 1, 2… failed sessions in a row
+    function giveUp(reason) { want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason }); }
     function open() {
       const my = ++epoch;
+      let gotResult = false, gotFinal = false, lastPar = '', err = null;
       rec = new SR(); rec.lang = 'ar-SA'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
+      // watchdog: Chrome sometimes goes quiet with no result, error or end — start a fresh recogniser
+      const pet = () => { clearTimeout(dog); dog = setTimeout(() => { if (my === epoch && rec) { try { rec.abort(); } catch (e) {} finish(); } }, 15000); };
       rec.onresult = e => {
         if (my !== epoch) return;          // a phrase from before a stop: ignore
-        let fin = '', par = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) { const t = e.results[i][0].transcript; if (e.results[i].isFinal) fin += t; else par += t; }
-        if (fin.trim()) emit('f', fin.trim()); else emit('p', par.trim());
+        pet(); gotResult = true; fails = 0;
+        const parts = [];
+        for (let i = e.resultIndex; i < e.results.length; i++) parts.push({ t: String(e.results[i][0].transcript || '').trim(), f: e.results[i].isFinal });
+        // Android may send growing copies of the same words as separate results: keep only the longest
+        const kept = parts.filter((x, i) => x.t && !parts.slice(i + 1).some(y => y.t.startsWith(x.t)));
+        const fin = kept.filter(x => x.f).map(x => x.t).join(' ').trim(), par = kept.filter(x => !x.f).map(x => x.t).join(' ').trim();
+        if (fin) {
+          gotFinal = true; lastPar = '';
+          const now = Date.now();
+          if (fin === lastFinal.t && now - lastFinal.at < 2500) return;    // the same final delivered twice
+          lastFinal = { t: fin, at: now };
+          emit('f', fin);
+          if (par) { lastPar = par; emit('p', par); }
+        } else if (par) { lastPar = par; emit('p', par); }
       };
-      rec.onerror = e => {
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { want = false; lastErr = 'not_granted'; }
-        else if (e.error === 'language-not-supported') { want = false; lastErr = 'unavailable'; }
-        else if (e.error === 'network') lastErr = 'network';
-      };
-      rec.onend = () => {
-        if (my !== epoch) return;
-        rec = null;
-        if (want) setTimeout(() => { if (want && !rec) { try { open(); } catch (err) { want = false; emit('s', { state: 'idle', reason: 'error' }); } } }, 60);
-        else emit('s', { state: 'idle', reason: lastErr || 'stopped' });
-      };
+      rec.onerror = e => { if (my === epoch) err = e.error; };
+      let ended = false;
+      function finish() {
+        if (ended || my !== epoch) return; ended = true;
+        clearTimeout(dog); rec = null;
+        // the phrase ended with words heard but never finalised (common on Android): judge them as final
+        if (lastPar && !gotFinal) emit('f', lastPar);
+        if (!want) return emit('s', { state: 'idle', reason: 'stopped' });
+        if (FATAL[err]) return giveUp(FATAL[err]);
+        // a session with nothing heard because of a real problem counts as a failure; silence (no-speech) does not
+        if (!gotResult && (err === 'network' || err === 'audio-capture' || (err && err !== 'no-speech' && err !== 'aborted'))) fails++;
+        else if (!gotResult && !err) fails = Math.min(fails + 0.5, 3);   // ended instantly with nothing: slow down a little
+        if (fails >= 8) return giveUp(err === 'audio-capture' ? 'audio' : err === 'network' ? 'network' : 'error');
+        if (fails >= 2 && err) emit('s', { state: 'retrying', reason: err === 'audio-capture' ? 'audio' : err === 'network' ? 'network' : 'error' });
+        clearTimeout(timer);
+        timer = setTimeout(() => { if (want && !rec) { try { open(); } catch (x) { giveUp('error'); } } }, BACKOFF[Math.min(Math.floor(fails), BACKOFF.length - 1)]);
+      }
+      rec.onend = finish;
+      pet();
       rec.start();
     }
     return {
-      start() { if (want) return; want = true; lastErr = null; open(); emit('s', { state: 'listening' }); },
-      stop() { want = false; epoch++; if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason: 'stopped' }); },
+      start() {
+        if (want) return;
+        want = true; fails = 0;
+        try { open(); } catch (e) { giveUp('error'); return false; }
+        emit('s', { state: 'listening' }); return true;
+      },
+      stop() { const was = want || rec; want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } if (was) emit('s', { state: 'idle', reason: 'stopped' }); },
+      get on() { return want; },
       onFinal(fn) { h.f.push(fn); }, onPartial(fn) { h.p.push(fn); }, onState(fn) { h.s.push(fn); },
     };
   }
-  let L = null;
+  let L = null, wantListen = false, sayToken = 0, wake = null, hiddenWhileListening = false;
+  const NOTES = {
+    not_granted: 'Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap <b>Continue</b>.',
+    unavailable: 'Arabic speech recognition is not available in this browser. Use Chrome, or Self-check.',
+    network: 'Speech recognition needs internet. Check your connection and tap <b>Continue</b>.',
+    audio: 'The microphone is not available — another app (or a call) may be using it. Close it and tap <b>Continue</b>.',
+    error: 'Listening stopped unexpectedly. Tap <b>Continue</b> to carry on.',
+  };
+  const RETRY = { network: 'No connection to speech recognition. Trying again…', audio: 'The microphone is busy (another app or a call?). Trying again…', error: 'Listening hiccup. Trying again…' };
+  async function keepAwake(on) {
+    try {
+      if (on && !wake && navigator.wakeLock && document.visibilityState === 'visible') { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => { wake = null; }); }
+      else if (!on && wake) { const w = wake; wake = null; await w.release(); }
+    } catch (e) { /* no wake lock (battery saver, old browser): the screen may sleep */ }
+  }
   function startListening() {
     if (!L) {
       L = makeListener();
       if (!L) { note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.'); return; }
-      L.onPartial(t => { if (!muted) { interim = t; think(false); } });
+      L.onPartial(t => { if (!muted) { interim = t; thinkSoon(); } });
       L.onFinal(t => { if (!muted) { heardFinal += ' ' + t; interim = ''; think(true); } });
       L.onState(({ state, reason }) => {
-        if (state === 'idle' && !muted) {
-          listening = false;
-          if (reason === 'not_granted') note('Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap Start again.');
-          else if (reason === 'unavailable') note('Arabic speech recognition is not available in this browser. Use Chrome, or Self-check.');
-          else if (reason === 'network') note('Speech recognition needs internet. Check your connection and tap Start.');
+        if (muted) return;
+        if (state === 'retrying') note(RETRY[reason] || RETRY.error, true);
+        else if (state === 'listening') { if ($('note').dataset.err) note(''); }
+        else if (state === 'idle' && reason !== 'stopped') {
+          // listening gave up by itself
+          wantListen = false; listening = false; keepAwake(false);
+          if (NOTES[reason]) note(NOTES[reason], true);
         }
         setMain(); status();
       });
     }
     note(''); heardFinal = ''; interim = '';
-    try { L.start(); listening = true; } catch (e) { note('Could not start the microphone: ' + esc(e.message || e)); }
+    wantListen = true;
+    if (L.start() === false) { wantListen = false; note(NOTES.error, true); }
+    else { listening = true; keepAwake(true); }
     setMain(); render(); status();
   }
-  function stopListening() { listening = false; if (L) L.stop(); live = null; setMain(); render(); status(); }
+  function stopListening() {
+    wantListen = false; listening = false; sayToken++; muted = false;
+    if (L) L.stop(); keepAwake(false);
+    live = null; interim = ''; setMain(); render(); status();
+  }
+  // screen off / tab hidden: Chrome stops the microphone; carry on by itself when the page is back
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      if (wantListen && mode === 'mic') { hiddenWhileListening = true; sayToken++; muted = false; if (L) L.stop(); listening = false; wake = null; }
+    } else if (hiddenWhileListening) {
+      hiddenWhileListening = false;
+      if (mode === 'mic' && !$('sumDlg').open) startListening();
+    }
+  });
 
   // ---------- each time words come in: where are we, and is anything wrong? ----------
+  let thinkQ = 0;
+  function thinkSoon() { if (thinkQ) return; thinkQ = requestAnimationFrame(() => { thinkQ = 0; if (interim) think(false); }); }
   function think(final) {
+    if (final && thinkQ) { cancelAnimationFrame(thinkQ); thinkQ = 0; }
     const said = (heardFinal + ' ' + interim).trim();
     if (!said) return;
     // basmala / isti'adha before the words are not part of the passage — except in al-Fatiha, where the basmala is ayah 1
@@ -180,7 +260,7 @@
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
       if (d.commit != null) {
         for (let i = res.a; i < d.commit; i++) mark(i, 'ok');
-        pos = d.commit; entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
+        pos = Math.max(pos, d.commit); entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
         hideStop();
         if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
       } else { entry.result = 'did not match the passage'; if (pos > 0) toastNote(`That didn't match. Carry on from <b>${esc(wordName(pos))}</b>.`); }
@@ -214,21 +294,34 @@
   }
   function hideStop() { $('stopCard').className = ''; document.body.classList.remove('stopped'); stop = null; }
   const speakable = t => t.replace(/[ۖ-ۭ]/g, '').replace(/ٱ/g, 'ا');
-  function arabicVoice() { const v = speechSynthesis.getVoices(); return v.find(x => /^ar[-_]SA/i.test(x.lang)) || v.find(x => /^ar/i.test(x.lang)) || null; }
-  /** pause listening, say the word, listen again */
+  let voices = [];
+  const loadVoices = () => { try { voices = speechSynthesis.getVoices() || []; } catch (e) { voices = []; } };
+  if (window.speechSynthesis) { loadVoices(); try { speechSynthesis.addEventListener('voiceschanged', loadVoices); } catch (e) {} }
+  function arabicVoice() { if (!voices.length) loadVoices(); return voices.find(x => /^ar[-_]SA/i.test(x.lang)) || voices.find(x => /^ar/i.test(x.lang)) || null; }
+  let warnedVoice = false;
+  /** pause listening, say the word, listen again (only if still wanted: the reciter may have stopped meanwhile) */
   function say(i) {
     const word = speakable(wordName(i));
-    const wasListening = listening;
-    muted = true; if (L && wasListening) L.stop(); listening = wasListening;
-    const resume = () => { muted = false; if (wasListening && mode === 'mic') { heardFinal = ''; interim = ''; L.start(); listening = true; } setMain(); status(); };
+    const my = ++sayToken;
+    muted = true; if (L) L.stop(); listening = wantListen;
+    const resume = () => {
+      if (my !== sayToken) return;                    // a newer word is being said, or listening was stopped
+      muted = false;
+      if (wantListen && mode === 'mic' && document.visibilityState !== 'hidden') { heardFinal = ''; interim = ''; if (L.start() === false) { wantListen = false; listening = false; note(NOTES.error, true); } else listening = true; }
+      else listening = false;
+      setMain(); status(); render();
+    };
     if (TEST && window.__spoken) { window.__spoken.push(word); setTimeout(resume, 30); return; }
     if (!$('voiceOn').checked || !window.speechSynthesis) { setTimeout(resume, 700); return; }
     try {
-      speechSynthesis.cancel();
+      if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(word); u.lang = 'ar-SA'; const v = arabicVoice(); if (v) u.voice = v; u.rate = 0.8;
-      let done = false; const fin = () => { if (!done) { done = true; setTimeout(resume, 250); } };
-      u.onend = fin; u.onerror = fin; setTimeout(fin, 5000);
-      speechSynthesis.speak(u);
+      if (!v && voices.length && !warnedVoice) { warnedVoice = true; toastNote('No Arabic voice on this device, so the word may not be spoken. Install Arabic in your phone\'s <b>Text-to-speech</b> settings.'); }
+      say.u = u;                                      // keep a reference: Chrome drops onend of garbage-collected utterances
+      // wait a little after the voice ends, so the recogniser does not hear the app's own voice
+      let done = false; const fin = () => { if (!done) { done = true; setTimeout(resume, 400); } };
+      u.onend = fin; u.onerror = fin; setTimeout(fin, 4000);
+      setTimeout(() => { if (my === sayToken) speechSynthesis.speak(u); else fin(); }, 60);
     } catch (e) { resume(); }
   }
 
@@ -262,7 +355,7 @@
     else { $('mainTxt').textContent = listening ? 'Stop listening' : (W.some(w => w.st !== 'p') ? 'Continue' : 'Start tasmi'); $('hintBtn').textContent = 'Hint'; }
   }
   function status() { $('status').textContent = mode === 'self' ? 'Self-check' : listening ? 'Listening' : 'Ready'; }
-  function note(msg) { $('note').innerHTML = msg || ''; $('note').classList.toggle('show', !!msg); }
+  function note(msg, isErr) { $('note').innerHTML = msg || ''; $('note').classList.toggle('show', !!msg); if (isErr) $('note').dataset.err = 1; else delete $('note').dataset.err; }
   let toastT = 0;
   function toastNote(msg) { note(msg); clearTimeout(toastT); toastT = setTimeout(() => note(''), 6000); }
   function addLog(e) {
@@ -283,7 +376,7 @@
     $('wordDlg').showModal();
   }
   function finish() {
-    if (listening) stopListening();
+    stopListening();
     hideStop();
     const c = { ok: 0, fixed: 0 }; W.forEach(w => { if (w.st in c) c[w.st]++; });
     const mistakes = W.filter(w => w.everWrong).length, unread = W.filter(w => w.st === 'p').length;
@@ -308,13 +401,15 @@
   }
 
   // ---------- controls ----------
+  let mainTap = 0;
   $('mainBtn').addEventListener('click', () => {
     if (mode === 'self') {
       if (selfPtr >= W.length) return;
       const a = passage[selfPtr][0]; while (selfPtr < W.length && passage[selfPtr][0] === a) selfPtr++;
       return render();
     }
-    if (listening) stopListening(); else startListening();
+    const now = Date.now(); if (now - (mainTap || 0) < 350) return; mainTap = now;   // a double tap
+    if (listening || wantListen) stopListening(); else startListening();
   });
   $('hintBtn').addEventListener('click', () => {
     if (mode === 'self') { if (selfPtr < W.length) { selfPtr++; render(); } return; }
@@ -322,7 +417,7 @@
     if (i < W.length) { hints.add(i); render(); }
   });
   $('doneBtn').addEventListener('click', finish);
-  $('scGo').addEventListener('click', () => { hideStop(); if (!listening && mode === 'mic') startListening(); });
+  $('scGo').addEventListener('click', () => { hideStop(); if (!wantListen && mode === 'mic') startListening(); });
   $('scAgain').addEventListener('click', () => { if (stop) say(stop.i); });
   $('scRight').addEventListener('click', () => {
     if (!stop) return;
@@ -339,7 +434,7 @@
   $('sAgain').addEventListener('click', () => { $('sumDlg').close(); reset(); setMain(); });
   $('modeSeg').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    if (listening) stopListening();
+    stopListening();
     mode = b.dataset.m; [...$('modeSeg').children].forEach(x => x.classList.toggle('on', x === b));
     note(mode === 'self' ? 'Recite from memory, then tap <b>Reveal next ayah</b> to check yourself. Tap a word you got wrong to mark it red.' : '');
     reset(); setMain(); status();
@@ -360,12 +455,13 @@
   // ---------- start ----------
   (async () => {
     try { if (window.caches) caches.delete('emuhaffiz-tajweed-v2'); } catch (e) { /* the old tajweed model's download */ }
-    [SURAHS, DIV] = await Promise.all([fetch('surahs.json?v=' + VER).then(r => r.json()), fetch('divisions.json?v=' + VER).then(r => r.json())]);
+    try { [SURAHS, DIV] = await Promise.all([getJSON('surahs.json?v=' + VER), getJSON('divisions.json?v=' + VER)]); }
+    catch (e) { $('status').textContent = 'Offline'; note('Could not load the Quran text — check your internet connection, then reload the page.', true); return; }
     START = [0, 1]; for (let n = 1; n < 114; n++) START.push(START[n] + SURAHS[n - 1][3]);
     $('surah').innerHTML = SURAHS.map(s => `<option value="${s[0]}">${s[0]}. ${s[2]} · ${s[1]}</option>`).join('');
     const sel = lsGet('tasmi.sel', null);
-    if (sel) for (const [k, v] of Object.entries(sel)) if ($(k) && v != null) $(k).value = v;
-    await build(); showHist(); setMain(); status();
+    if (sel) for (const [k, v] of Object.entries(sel)) if ($(k) && v != null) { const old = $(k).value; $(k).value = v; if ($(k).value !== String(v)) $(k).value = old; }
+    try { await build(); } catch (e) { lsSet('tasmi.sel', null); $('unit').value = 'page'; $('page').value = 1; $('surah').value = 1; await build(); } showHist(); setMain(); status();
     if (!(window.SpeechRecognition || window.webkitSpeechRecognition)) note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.');
     if (TEST) window.__app = { get pos() { return pos; }, get W() { return W; }, get passage() { return passage; }, get S() { return S; },
       get T() { return T; }, get stop() { return stop; }, get listening() { return listening; } };

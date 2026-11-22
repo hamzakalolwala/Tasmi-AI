@@ -22,6 +22,12 @@ const FAKE_SR = () => {
       this.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: text }], { isFinal: final })] });
       if (final) { if (window.__sr === this) window.__sr = null; setTimeout(() => this.onend && this.onend(), 0); }
     }
+    /** the session ends with no final result (Android does this), optionally after an error */
+    end(error) {
+      if (window.__sr === this) window.__sr = null;
+      if (error) this.onerror && this.onerror({ error });
+      setTimeout(() => this.onend && this.onend(), 0);
+    }
   }
   window.SpeechRecognition = window.webkitSpeechRecognition = FakeSR;
   window.__spoken = [];
@@ -249,5 +255,114 @@ test('al-Fatiha: the basmala is ayah 1 there and is checked, not ignored', async
   const s = await state(p);
   assert.ok(s.st.slice(0, 8).every(x => x === 'ok'), JSON.stringify(s.st.slice(0, 8)));
   assert.strictEqual(s.pos, 8);
+  await p.close();
+});
+
+// ---------- resilience: what real recognisers and phones do ----------
+test('a phrase that ends without a final result (Android) is still judged — no false "skipped" stop', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    await recite(sp(0, 4), { final: false }); window.__sr.end();          // ayah 1 heard only as interim, then the session ended
+    await new Promise(r => setTimeout(r, 150));
+    const after1 = __app.pos;
+    await recite(sp(4, 6));
+    return { after1, pos: __app.pos };
+  });
+  const s = await state(p);
+  assert.strictEqual(r.after1, 4);
+  assert.strictEqual(r.pos, 6);
+  assert.deepStrictEqual(s.spoken, []);
+  await p.close();
+});
+test('the same final result delivered twice is judged once', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const pos = await p.evaluate(async () => {
+    const sr = await (async () => { for (let i = 0; i < 100 && !window.__sr; i++) await new Promise(r => setTimeout(r, 10)); return window.__sr; })();
+    sr.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: sp(0, 4) }], { isFinal: true })] });
+    sr.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: sp(0, 4) }], { isFinal: true })] });
+    sr.end(); await new Promise(r => setTimeout(r, 150));
+    return __app.pos;
+  });
+  assert.strictEqual(pos, 4);
+  assert.strictEqual(await p.evaluate(() => __log.length), 1);
+  await p.close();
+});
+test('silence (no-speech) keeps listening; repeated network errors back off, then stop with a message', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const next = async () => { for (let i = 0; i < 600 && !window.__sr; i++) await wait(10); return window.__sr; };
+    for (let i = 0; i < 3; i++) { (await next()).end('no-speech'); await wait(20); }
+    const afterSilence = __app.listening, startsBefore = window.__srStarts;
+    const t0 = Date.now();
+    for (let i = 0; i < 8; i++) { const sr = await next(); if (!sr) break; sr.end('network'); await wait(5); }
+    await wait(100);
+    return { afterSilence, starts: window.__srStarts - startsBefore, ms: Date.now() - t0, listening: __app.listening,
+      note: document.getElementById('note').textContent, btn: document.getElementById('mainTxt').textContent };
+  });
+  assert.strictEqual(r.afterSilence, true);
+  assert.ok(r.ms > 2000, 'backed off between retries: ' + r.ms);
+  assert.strictEqual(r.listening, false);
+  assert.match(r.note, /internet/);
+  assert.match(r.btn, /Start|Continue/);
+  await p.close();
+});
+test('microphone blocked → stops at once with a message', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    for (let i = 0; i < 100 && !window.__sr; i++) await new Promise(r => setTimeout(r, 10));
+    const n = window.__srStarts; window.__sr.end('not-allowed'); await new Promise(r => setTimeout(r, 300));
+    return { more: window.__srStarts - n, listening: __app.listening, note: document.getElementById('note').textContent };
+  });
+  assert.deepStrictEqual([r.more, r.listening], [0, false]);
+  assert.match(r.note, /blocked the microphone/);
+  await p.close();
+});
+test('stopping while the right word is being said does not switch the mic back on', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    const w = sp(0, 4).split(' '); w[3] = 'الكريم';
+    const sr = await (async () => { for (let i = 0; i < 100 && !window.__sr; i++) await new Promise(r => setTimeout(r, 10)); return window.__sr; })();
+    await new Promise(r => setTimeout(r, 400));       // (not a double tap)
+    sr.emit(w.join(' '), true);                       // mistake → the app stops the mic to say the word
+    document.getElementById('mainBtn').click();       // …and the reciter taps Stop meanwhile
+    await new Promise(r => setTimeout(r, 300));
+    return { listening: __app.listening, sr: !!window.__sr, spoken: __spoken.length };
+  });
+  assert.deepStrictEqual(r, { listening: false, sr: false, spoken: 1 });
+  await p.close();
+});
+test('screen off / tab hidden: listening pauses and carries on when the page is back', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await startTasmi(p);
+  const r = await p.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    let vis = 'visible'; Object.defineProperty(document, 'visibilityState', { get: () => vis, configurable: true });
+    await wait(50);
+    vis = 'hidden'; document.dispatchEvent(new Event('visibilitychange')); await wait(100);
+    const hidden = { listening: __app.listening, sr: !!window.__sr };
+    vis = 'visible'; document.dispatchEvent(new Event('visibilitychange')); await wait(100);
+    await recite(sp(0, 4));
+    return { hidden, listening: __app.listening, pos: __app.pos };
+  });
+  assert.deepStrictEqual(r, { hidden: { listening: false, sr: false }, listening: true, pos: 4 });
+  await p.close();
+});
+test('a surah that fails to load shows a message instead of breaking', async () => {
+  const p = await open({ unit: 'range', surah: 112, from: 1, to: 4 });
+  await p.route('**/words/113.json*', r => r.abort());
+  const r = await p.evaluate(async () => {
+    const s = document.getElementById('surah'); s.value = 113; s.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 3500));
+    return { note: document.getElementById('note').textContent, sn: __app.S[0].sn };
+  });
+  assert.match(r.note, /Could not load/);
+  assert.strictEqual(r.sn, 112, 'the old passage is still usable');
+  assert.deepStrictEqual(p.errs, []);
   await p.close();
 });
