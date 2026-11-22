@@ -34,8 +34,9 @@ public class MainActivity extends Activity {
     private WebView web;
     private Listener listener;
     private TextToSpeech tts;
-    private boolean ttsArabic, resumed, startWhenResumed;
+    private boolean ttsReady, ttsArabic, resumed, startWhenResumed, micRefused;
     private String pendingLang;
+    private boolean refusedNote;   // the page may have missed the refusal while the permission dialog hid it
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override protected void onCreate(Bundle saved) {
@@ -76,6 +77,7 @@ public class MainActivity extends Activity {
             int r = tts.setLanguage(new Locale("ar", "SA"));
             if (r < 0) r = tts.setLanguage(new Locale("ar"));
             ttsArabic = r >= 0;
+            ttsReady = true;
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override public void onStart(String id) { }
                 @Override public void onDone(String id) { send("ttsDone", "id", id); }
@@ -104,6 +106,7 @@ public class MainActivity extends Activity {
         }
         @JavascriptInterface public void stopSpeaking() { if (tts != null) tts.stop(); }
         @JavascriptInterface public boolean hasArabicVoice() { return ttsArabic; }
+        @JavascriptInterface public boolean ttsReady() { return ttsReady; }
         @JavascriptInterface public boolean copy(String text) {
             try {
                 ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -116,6 +119,8 @@ public class MainActivity extends Activity {
     private void startListen(String lang) {
         if (!Listener.available(this)) { send("error", "error", "language-not-supported"); return; }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            // refused for good ("don't ask again"): don't keep asking, the page explains where to allow it
+            if (micRefused && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) { send("error", "error", "not-allowed"); return; }
             pendingLang = lang;
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, MIC);
             return;
@@ -127,8 +132,8 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         if (code != MIC) return;
-        if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) startListen(pendingLang);
-        else send("error", "error", "not-allowed");
+        if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) { micRefused = false; startListen(pendingLang); }
+        else { micRefused = true; refusedNote = true; send("error", "error", "not-allowed"); }
     }
 
     private void keepScreenOn(boolean on) {
@@ -152,6 +157,7 @@ public class MainActivity extends Activity {
         super.onResume();
         resumed = true;
         web.onResume();
+        if (refusedNote) { refusedNote = false; send("refused", null, null); }
         if (startWhenResumed) { startWhenResumed = false; startListen(pendingLang); }
     }
 

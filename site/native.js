@@ -36,7 +36,6 @@
       const last = this._r[this._r.length - 1];
       if (last && !last.f) { last.t = t; last.f = true; } else this._r.push({ t, f: true });
       this._emit(this._r.length - 1);
-      if (this._r.length > 200) this._r = this._r.slice(-50).map(x => x);  // a very long session: keep it small
     }
   }
   window.SpeechRecognition = window.webkitSpeechRecognition = NativeRecognition;
@@ -53,7 +52,10 @@
       if (!N.speak(u.text, +u.rate || 1, id)) setTimeout(() => done(id, 'error'), 0);
     },
     cancel() { N.stopSpeaking(); for (const id of [...pending.keys()]) done(id, 'error'); },
-    getVoices() { return N.hasArabicVoice() ? [{ lang: 'ar-SA', name: 'Android Arabic', default: true, localService: true, voiceURI: 'android-ar' }] : []; },
+    getVoices() {
+      if (N.hasArabicVoice()) return [{ lang: 'ar-SA', name: 'Android Arabic', default: true, localService: true, voiceURI: 'android-ar' }];
+      return N.ttsReady() ? [{ lang: 'en', name: 'Android (no Arabic)', default: true, localService: true, voiceURI: 'android' }] : [];   // app.js warns
+    },
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
   };
@@ -76,6 +78,7 @@
         case 'ttsDone': done(ev.id, 'end'); break;
         case 'ttsError': done(ev.id, 'error'); break;
         case 'voices': (listeners.voiceschanged || []).forEach(fn => fn()); break;
+        case 'refused': if (window.__tasmiRefused) window.__tasmiRefused(); break;   // the mic was refused while the dialog hid the page
       }
     },
   };

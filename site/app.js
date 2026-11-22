@@ -213,6 +213,7 @@
     quiet: 'Listening paused because it was quiet for a while. Tap <b>Continue</b> when you are ready.',
   };
   const RETRY = { network: 'No connection to speech recognition. Trying again…', audio: 'The microphone is busy (another app or a call?). Trying again…', error: 'Listening hiccup. Trying again…' };
+  window.__tasmiRefused = () => { if (!wantListen) note(NOTES.not_granted, true); };
   async function keepAwake(on) {
     try {
       if (on && !wake && navigator.wakeLock && document.visibilityState === 'visible') { wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => { wake = null; }); }

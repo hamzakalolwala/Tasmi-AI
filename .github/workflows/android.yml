@@ -44,7 +44,10 @@ jobs:
           echo "TASMI_KEYSTORE=$RUNNER_TEMP/tasmi.keystore" >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: android
-        run: gradle --no-daemon assembleRelease
+        # downloads can be rate-limited (HTTP 429): try again before giving up
+        run: |
+          for i in 1 2 3; do gradle --no-daemon assembleRelease && exit 0; echo "build attempt $i failed, retrying"; sleep $((i * 30)); done
+          exit 1
       - name: Name the APK
         run: cp android/app/build/outputs/apk/release/app-release.apk TasmiAI.apk && ls -la TasmiAI.apk
       - uses: actions/upload-artifact@v4

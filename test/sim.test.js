@@ -288,3 +288,17 @@ test('Android app: microphone permission refused → message, no retry loop', as
   assert.match(r.note, /microphone/i);
   await p.close();
 });
+
+test('Android app: a long session (260 phrases) — every phrase is still judged', async () => {
+  const p = await openNative({ unit: 'juz', para: 1 });
+  const r = await p.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const words = []; for (let i = 0; i < __app.passage.length; i++) { const [x, k] = __app.passage[i]; words.push([].concat(__app.S[x].i[k])); }
+    let i = 0, n = 0;
+    while (n < 260 && i < words.length - 3) { nativeEvent({ type: 'final', text: words.slice(i, i + 3).flat().join(' ') }); i += 3; n++; await wait(15); }
+    await wait(300);
+    return { pos: __app.pos, expected: i, spoken: __native.spoken.length };
+  });
+  assert.deepStrictEqual(r, { pos: r.expected, expected: r.expected, spoken: 0 });
+  await p.close();
+});
