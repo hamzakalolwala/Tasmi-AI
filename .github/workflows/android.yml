@@ -1,0 +1,60 @@
+# Builds the Tasmi AI Android app (APK) and publishes it as the "app" release: a fixed download link for the phone.
+name: Android app
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths: ['site/**', 'android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: { group: android-${{ github.ref }}, cancel-in-progress: true }
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Word engine tests
+        run: node --test test/recite.test.js
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.14.3' }
+      - name: Signing key
+        # The same key every time lets a new APK install over the old one. It comes from the repository secrets
+        # TASMI_KEYSTORE_B64 (base64 of the keystore) and TASMI_KEY_PASSWORD; without them a new key is made for
+        # this build, and installing it over an earlier build needs an uninstall first.
+        env:
+          KS: ${{ secrets.TASMI_KEYSTORE_B64 }}
+          PW: ${{ secrets.TASMI_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KS" ] && [ -n "$PW" ]; then
+            echo "$KS" | base64 -d > "$RUNNER_TEMP/tasmi.keystore"
+            echo "TASMI_KEY_PASSWORD=$PW" >> "$GITHUB_ENV"
+          else
+            PW=$(openssl rand -hex 16); echo "::add-mask::$PW"
+            keytool -genkeypair -keystore "$RUNNER_TEMP/tasmi.keystore" -storepass "$PW" -keypass "$PW" -alias tasmi \
+              -keyalg RSA -keysize 2048 -validity 20000 -dname "CN=Tasmi AI"
+            echo "TASMI_KEY_PASSWORD=$PW" >> "$GITHUB_ENV"
+            echo "::warning::No TASMI_KEYSTORE_B64 secret: signed with a one-off key (uninstall the old app before installing this one)"
+          fi
+          echo "TASMI_KEYSTORE=$RUNNER_TEMP/tasmi.keystore" >> "$GITHUB_ENV"
+      - name: Build APK
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk TasmiAI.apk && ls -la TasmiAI.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: TasmiAI-apk, path: TasmiAI.apk }
+      - name: Publish as the "app" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Tasmi AI for Android — build ${{ github.run_number }} from ${GITHUB_REF_NAME} (${GITHUB_SHA::7}). Download TasmiAI.apk on the phone and open it to install."
+          if gh release view app >/dev/null 2>&1; then
+            gh release upload app TasmiAI.apk --clobber
+            gh release edit app --title "Tasmi AI app (build ${{ github.run_number }})" --notes "$notes" --target "$GITHUB_SHA" --latest
+          else
+            gh release create app TasmiAI.apk --title "Tasmi AI app (build ${{ github.run_number }})" --notes "$notes" --target "$GITHUB_SHA" --latest
+          fi

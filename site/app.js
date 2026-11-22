@@ -206,6 +206,10 @@
     network: 'Speech recognition needs internet. Check your connection and tap <b>Continue</b>.',
     audio: 'The microphone is not available — another app (or a call) may be using it. Close it and tap <b>Continue</b>.',
     error: 'Listening stopped unexpectedly. Tap <b>Continue</b> to carry on.',
+    ...(window.TasmiNative ? {         // inside the Android app
+      not_granted: 'Tasmi AI needs the microphone. Tap <b>Continue</b> and allow it — or allow Microphone in Android Settings → Apps → Tasmi AI → Permissions.',
+      unavailable: 'Arabic speech recognition is not installed on this phone. Install or update the <b>Google</b> app (and "Speech Recognition & Synthesis"), then tap <b>Continue</b>.',
+    } : {}),
     quiet: 'Listening paused because it was quiet for a while. Tap <b>Continue</b> when you are ready.',
   };
   const RETRY = { network: 'No connection to speech recognition. Trying again…', audio: 'The microphone is busy (another app or a call?). Trying again…', error: 'Listening hiccup. Trying again…' };
@@ -473,7 +477,9 @@
   $('prevU').addEventListener('click', () => step(-1));
   $('nextU').addEventListener('click', () => step(1));
   $('copyLog').addEventListener('click', () => {
-    navigator.clipboard.writeText(JSON.stringify({ unit: unitLabel, ua: navigator.userAgent, log }, null, 1))
+    const text = JSON.stringify({ unit: unitLabel, ua: navigator.userAgent, log }, null, 1);
+    if (window.__tasmiCopy && window.__tasmiCopy(text)) return toastNote('Log copied. Paste it to Claude.');
+    navigator.clipboard.writeText(text)
       .then(() => toastNote('Log copied. Paste it to Claude.'), () => toastNote('Could not copy.'));
   });
 

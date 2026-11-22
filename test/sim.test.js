@@ -199,3 +199,92 @@ test('android: a long messy session (mistakes, restarted ayat) — progress and 
   assert.ok(r.starts <= 1 + r.made, `mic starts ${r.starts} for ${r.made} corrections`);
   await p.close();
 });
+
+// ---------- inside the Android app: native.js turns Android's recogniser and voice into the browser APIs ----------
+const NATIVE = () => {
+  const ev = e => setTimeout(() => window.__tasmiNative && window.__tasmiNative.onEvent(e), 0);
+  const n = window.__native = { starts: 0, stops: 0, spoken: [], on: false };
+  window.TasmiNative = {
+    startListening() { n.starts++; n.on = true; },
+    stopListening() { n.stops++; n.on = false; },
+    speak(text, rate, id) { n.spoken.push(text); setTimeout(() => ev({ type: 'ttsDone', id }), 50); return true; },
+    stopSpeaking() {}, hasArabicVoice() { return true; }, copy() { return true; },
+  };
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  /** Android: partial results word by word, a final at each pause; the app's Listener restarts by itself in between */
+  window.nativeRecite = async phrases => {
+    for (const ph of phrases) {
+      for (let i = 0; i < 100 && !n.on; i++) await wait(20);
+      for (let i = 1; i <= ph.length; i++) { if (n.on) ev({ type: 'partial', text: ph.slice(0, i).join(' ') }); await wait(40); }
+      if (n.on) ev({ type: 'final', text: ph.join(' ') });
+      await wait(200);
+    }
+    await wait(300);
+  };
+  window.nativeEvent = ev;
+};
+async function openNative(set) {
+  const page = await browser.newPage();
+  const errs = []; page.on('pageerror', e => errs.push(String(e))); page.errs = errs;
+  await page.addInitScript(() => { try { if (!sessionStorage.__cleared) { localStorage.clear(); sessionStorage.__cleared = 1; } } catch (e) {} });
+  await page.addInitScript(NATIVE);
+  await page.goto(base + '/site/index.html?test=1&quiet=8000');
+  await page.waitForFunction(() => window.__app && window.__app.passage.length > 0);
+  await page.evaluate(async set => {
+    for (const [k, v] of Object.entries(set)) document.getElementById(k).value = v;
+    document.getElementById('unit').dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 400));
+    window.phrasesOf = (a, b) => { const out = []; let cur = [], ai = null;
+      for (let i = a; i < b; i++) { const [x, k] = __app.passage[i]; if (ai !== null && (x !== ai || cur.length >= 6)) { out.push(cur); cur = []; } ai = x; cur.push(...[].concat(__app.S[x].i[k])); }
+      if (cur.length) out.push(cur); return out; };
+  }, set);
+  await page.click('#mainBtn');
+  return page;
+}
+
+test('Android app: a page with a mistake — listening starts once, the word is said by Android, mistake kept', async () => {
+  const p = await openNative({ unit: 'range', surah: 2, from: 2, to: 5 });
+  const r = await p.evaluate(async () => {
+    delete window.__spoken;                                   // use the real say() path through native.js
+    const ph = phrasesOf(0, __app.passage.length), bad = ph.map(x => [...x]); bad[0][3] = 'شك';
+    await nativeRecite([bad[0]]);
+    await new Promise(r => setTimeout(r, 1200));
+    await nativeRecite(ph);
+    return { starts: __native.starts, spoken: __native.spoken, pos: __app.pos, n: __app.passage.length, st3: __app.W[3].st,
+      native: document.documentElement.classList.contains('native') };
+  });
+  assert.deepStrictEqual(p.errs, []);
+  assert.strictEqual(r.native, true);
+  assert.strictEqual(r.spoken.length, 1);
+  assert.match(r.spoken[0].replace(/[ً-ْ]/g, ''), /ريب/);
+  assert.strictEqual(r.st3, 'fixed');
+  assert.strictEqual(r.pos, r.n);
+  assert.strictEqual(r.starts, 2, 'started once, and once more after saying the word');
+  await p.close();
+});
+
+test('Android app: Android ends the session after a long quiet → the page pauses with a message', async () => {
+  const p = await openNative({ unit: 'range', surah: 112, from: 1, to: 4 });
+  const r = await p.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 9000));
+    nativeEvent({ type: 'error', error: 'no-speech' });
+    await new Promise(r => setTimeout(r, 300));
+    return { listening: __app.listening, note: document.getElementById('note').textContent, starts: __native.starts };
+  });
+  assert.strictEqual(r.listening, false);
+  assert.match(r.note, /quiet/);
+  assert.strictEqual(r.starts, 1);
+  await p.close();
+});
+
+test('Android app: microphone permission refused → message, no retry loop', async () => {
+  const p = await openNative({ unit: 'range', surah: 112, from: 1, to: 4 });
+  const r = await p.evaluate(async () => {
+    nativeEvent({ type: 'error', error: 'not-allowed' });
+    await new Promise(r => setTimeout(r, 500));
+    return { listening: __app.listening, note: document.getElementById('note').textContent, starts: __native.starts };
+  });
+  assert.deepStrictEqual([r.listening, r.starts], [false, 1]);
+  assert.match(r.note, /microphone/i);
+  await p.close();
+});
