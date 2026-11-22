@@ -78,7 +78,7 @@
     showSel();
     const { r: [f, l], label } = chosen();
     const [s0, a0] = sa(f), [s1, a1] = sa(l);
-    unitLabel = `${label} · ${SURAHS[s0 - 1][2]} ${ayahRef(s0, a0)}` + (f !== l ? ` – ${s1 !== s0 ? SURAHS[s1 - 1][2] + ' ' : ''}${ayahRef(s1, a1)}` : '');
+    const newLabel = `${label} · ${SURAHS[s0 - 1][2]} ${ayahRef(s0, a0)}` + (f !== l ? ` – ${s1 !== s0 ? SURAHS[s1 - 1][2] + ' ' : ''}${ayahRef(s1, a1)}` : '');
     lsSet('tasmi.sel', { unit: $('unit').value, page: $('page').value, para: $('para').value, ruba: $('ruba').value, nisf: $('nisf').value,
       surah: $('surah').value, ayah: $('ayah').value, from: $('from').value, to: $('to').value });
     const token = (build.token = (build.token || 0) + 1);
@@ -93,7 +93,7 @@
       return;
     }
     if (token !== build.token) return;
-    $('unitDesc').textContent = unitLabel;
+    unitLabel = newLabel; $('unitDesc').textContent = unitLabel;
     if ($('note').dataset.err && !listening) note('');
     if (listening || wantListen) stopListening();
     S = ayat; passage = [];
@@ -135,7 +135,7 @@
       const pet = () => { clearTimeout(dog); dog = setTimeout(() => { if (my === epoch && rec) { try { rec.abort(); } catch (e) {} finish(); } }, 15000); };
       rec.onresult = e => {
         if (my !== epoch) return;          // a phrase from before a stop: ignore
-        pet(); gotResult = true; fails = 0;
+        pet(); gotResult = true; if (fails >= 2) emit('s', { state: 'listening' }); fails = 0;   // recovered: clear the note
         const parts = [];
         for (let i = e.resultIndex; i < e.results.length; i++) parts.push({ t: String(e.results[i][0].transcript || '').trim(), f: e.results[i].isFinal });
         // Android may send growing copies of the same words as separate results: keep only the longest
@@ -155,8 +155,8 @@
       function finish() {
         if (ended || my !== epoch) return; ended = true;
         clearTimeout(dog); rec = null;
-        // the phrase ended with words heard but never finalised (common on Android): judge them as final
-        if (lastPar && !gotFinal) emit('f', lastPar);
+        // words heard but never finalised (common on Android, also an interim tail after a final): judge them as final
+        if (lastPar) emit('f', lastPar);
         if (!want) return emit('s', { state: 'idle', reason: 'stopped' });
         if (FATAL[err]) return giveUp(FATAL[err]);
         // a session with nothing heard because of a real problem counts as a failure; silence (no-speech) does not
@@ -223,14 +223,14 @@
     setMain(); render(); status();
   }
   function stopListening() {
-    wantListen = false; listening = false; sayToken++; muted = false;
+    wantListen = false; listening = false; sayToken++; muted = false; pending = null; clearTimeout(pendingT);
     if (L) L.stop(); keepAwake(false);
     live = null; interim = ''; setMain(); render(); status();
   }
   // screen off / tab hidden: Chrome stops the microphone; carry on by itself when the page is back
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
-      if (wantListen && mode === 'mic') { hiddenWhileListening = true; sayToken++; muted = false; if (L) L.stop(); listening = false; wake = null; }
+      if (wantListen && mode === 'mic') { hiddenWhileListening = true; sayToken++; muted = false; interim = ''; pending = null; clearTimeout(pendingT); if (L) L.stop(); listening = false; wake = null; }
     } else if (hiddenWhileListening) {
       hiddenWhileListening = false;
       if (mode === 'mic' && !$('sumDlg').open) startListening();

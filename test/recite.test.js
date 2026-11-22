@@ -144,3 +144,22 @@ test('real mistakes stay mistakes: عن/إن, قل/كل, a different word with t
   const P = passageOf(112, 1, 1);
   assert.strictEqual(step(P, 0, 'كل هو الله أحد').stop, 0);
 });
+
+test('every ayah of the whole Quran, recited correctly, is never stopped (final and interim)', () => {
+  const bad = [];
+  for (let sn = 1; sn <= 114; sn++) {
+    const n = surah(sn).length;
+    for (let an = 1; an <= n; an += 3) {                       // 3 ayat at a time, as one passage
+      const P = passageOf(sn, an, Math.min(n, an + 2));
+      let pos = 0;
+      for (const [ai] of P.S.entries()) {
+        const s = P.passage.findIndex(([x]) => x === ai), e = P.passage.findIndex(([x]) => x > ai), end = e < 0 ? P.passage.length : e;
+        const text = spoken(P, s, end), w = text.split(' ');
+        for (let k = 1; k < w.length; k++) { const d = step(P, pos, w.slice(0, k).join(' '), false); if (d.stop != null) { bad.push(`${sn}:${an + ai} interim @${d.stop}`); break; } }
+        const d = step(P, pos, text);
+        if (d.commit !== end) { bad.push(`${sn}:${an + ai} ${JSON.stringify(d)}`); pos = end; } else pos = d.commit;
+      }
+    }
+  }
+  assert.deepStrictEqual(bad, []);
+});

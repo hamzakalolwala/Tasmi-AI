@@ -298,14 +298,21 @@ test('silence (no-speech) keeps listening; repeated network errors back off, the
     const wait = ms => new Promise(r => setTimeout(r, ms));
     const next = async () => { for (let i = 0; i < 600 && !window.__sr; i++) await wait(10); return window.__sr; };
     for (let i = 0; i < 3; i++) { (await next()).end('no-speech'); await wait(20); }
-    const afterSilence = __app.listening, startsBefore = window.__srStarts;
+    const afterSilence = __app.listening;
+    for (let i = 0; i < 3; i++) { (await next()).end('network'); await wait(5); }
+    const retryNote = document.getElementById('note').textContent;
+    await recite(sp(0, 4));                                                  // the connection came back
+    const recovered = { note: document.getElementById('note').textContent, pos: __app.pos };
+    const startsBefore = window.__srStarts;
     const t0 = Date.now();
     for (let i = 0; i < 8; i++) { const sr = await next(); if (!sr) break; sr.end('network'); await wait(5); }
     await wait(100);
-    return { afterSilence, starts: window.__srStarts - startsBefore, ms: Date.now() - t0, listening: __app.listening,
+    return { afterSilence, retryNote, recovered, starts: window.__srStarts - startsBefore, ms: Date.now() - t0, listening: __app.listening,
       note: document.getElementById('note').textContent, btn: document.getElementById('mainTxt').textContent };
   });
   assert.strictEqual(r.afterSilence, true);
+  assert.match(r.retryNote, /Trying again/);
+  assert.deepStrictEqual(r.recovered, { note: '', pos: 4 });
   assert.ok(r.ms > 2000, 'backed off between retries: ' + r.ms);
   assert.strictEqual(r.listening, false);
   assert.match(r.note, /internet/);
@@ -361,9 +368,10 @@ test('a surah that fails to load shows a message instead of breaking', async () 
   const r = await p.evaluate(async () => {
     const s = document.getElementById('surah'); s.value = 113; s.dispatchEvent(new Event('change'));
     await new Promise(r => setTimeout(r, 3500));
-    return { note: document.getElementById('note').textContent, sn: __app.S[0].sn };
+    return { note: document.getElementById('note').textContent, sn: __app.S[0].sn, desc: document.getElementById('unitDesc').textContent };
   });
   assert.match(r.note, /Could not load/);
+  assert.match(r.desc, /112:1/, 'the label still names the passage on screen');
   assert.strictEqual(r.sn, 112, 'the old passage is still usable');
   assert.deepStrictEqual(p.errs, []);
   await p.close();

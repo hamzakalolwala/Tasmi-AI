@@ -43,14 +43,14 @@
     return lev(h, e) <= (L >= 10 ? 2 : 1);
   }
   const DIG = { 1: 'واحد', 2: 'اثنين', 3: 'ثلاثة', 4: 'أربعة', 5: 'خمسة', 6: 'ستة', 7: 'سبعة', 8: 'ثمانية', 9: 'تسعة', 10: 'عشرة', 30: 'ثلاثين', 40: 'أربعين', 50: 'خمسين', 60: 'ستين', 70: 'سبعين', 100: 'مائة', 200: 'مائتين', 1000: 'ألف', 2000: 'ألفين' };
-  const FILLER = /^(آ+|ا{2,}|ام{2,}|م{2,}|ء+|[آا]ه+)$/;   // on the raw word: آآ امم ممم اه (not أمم)
+  const FILLER = /^(آ+|ا{2,}|ام{3,}|م{3,}|ء+|[آا]ه+)$/;   // on the raw word: آآ اممم ممم اه — not مم (86:5) or امم (أمم)
   /** heard text → words: digits as number words, fillers (آآ، امم) dropped, a lone و/ف/ب joined to the next word */
   function prep(text) {
     let r = String(text || '').trim().split(/\s+/)
       .map(w => w.replace(/[٠-٩]/g, d => d.charCodeAt(0) - 0x660)).map(w => /^\d+$/.test(w) ? (DIG[+w] || w) : w)
       .filter(w => norm(w) && !FILLER.test(w.replace(HARAKAT, '')));
     const out = [];
-    for (let i = 0; i < r.length; i++) { const n = norm(r[i]); if (n.length === 1 && 'وفب'.includes(n) && r[i + 1]) { out.push(r[i] + r[i + 1]); i++; } else out.push(r[i]); }
+    for (let i = 0; i < r.length; i++) { if (/^[وفب]$/.test(r[i].replace(HARAKAT, '')) && r[i + 1]) { out.push(r[i] + r[i + 1]); i++; } else out.push(r[i]); }
     return out;
   }
   const words = text => prep(text).map(norm);
