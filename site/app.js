@@ -119,62 +119,77 @@
   }
 
   // ---------- the listener: the browser's speech recognition, restarted after every phrase ----------
+  /** The microphone stays on for the whole recitation: one continuous recogniser session, restarted only when Chrome
+   *  ends it (a long silence, a network hiccup) — every start beeps on Android, so never restart per phrase. */
   function makeListener() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return null;
-    let want = false, rec = null, epoch = 0, fails = 0, timer = 0, dog = 0, lastFinal = { t: '', at: 0 };
+    let want = false, rec = null, epoch = 0, fails = 0, timer = 0, dog = 0, quietSince = 0;
     const h = { f: [], p: [], s: [] }, emit = (k, e) => h[k].forEach(fn => fn(e));
     const FATAL = { 'not-allowed': 'not_granted', 'service-not-allowed': 'not_granted', 'language-not-supported': 'unavailable' };
-    const BACKOFF = [60, 60, 300, 1000, 2500, 4000];   // ms before restarting after 0, 1, 2… failed sessions in a row
+    const BACKOFF = [0, 200, 600, 1200, 2500, 4000];   // ms before restarting after 0, 1, 2… failed sessions in a row
+    const clean = t => String(t || '').replace(/\s+/g, ' ').trim();
+    const reasonOf = err => err === 'audio-capture' ? 'audio' : err === 'network' ? 'network' : 'error';
     function giveUp(reason) { want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason }); }
     function open() {
       const my = ++epoch;
-      let gotResult = false, gotFinal = false, lastPar = '', err = null;
-      rec = new SR(); rec.lang = 'ar-SA'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
-      // watchdog: Chrome sometimes goes quiet with no result, error or end — start a fresh recogniser
-      const pet = () => { clearTimeout(dog); dog = setTimeout(() => { if (my === epoch && rec) { try { rec.abort(); } catch (e) {} finish(); } }, 15000); };
+      let gotResult = false, err = null, lastPar = '';
+      const done = [];            // result indexes already passed on as final
+      let said = '';              // everything passed on as final in this session (Android repeats it in later results)
+      rec = new SR(); rec.lang = 'ar-SA'; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 1;
+      // a recogniser stuck in the middle of a phrase (no new result for a long time) is replaced; plain silence is fine
+      const pet = () => { clearTimeout(dog); dog = setTimeout(() => { if (my === epoch && rec && lastPar) { try { rec.abort(); } catch (e) {} finish(); } }, 12000); };
+      /** drop what was already passed on: Android writes earlier finals again at the start of later results */
+      const fresh = t => {
+        if (said && t.startsWith(said)) return t.slice(said.length).trim();
+        if (said && said.endsWith(t)) return '';
+        return t;
+      };
       rec.onresult = e => {
         if (my !== epoch) return;          // a phrase from before a stop: ignore
-        pet(); gotResult = true; if (fails >= 2) emit('s', { state: 'listening' }); fails = 0;   // recovered: clear the note
-        const parts = [];
-        for (let i = e.resultIndex; i < e.results.length; i++) parts.push({ t: String(e.results[i][0].transcript || '').trim(), f: e.results[i].isFinal });
-        // Android may send growing copies of the same words as separate results: keep only the longest
-        const kept = parts.filter((x, i) => x.t && !parts.slice(i + 1).some(y => y.t.startsWith(x.t)));
-        const fin = kept.filter(x => x.f).map(x => x.t).join(' ').trim(), par = kept.filter(x => !x.f).map(x => x.t).join(' ').trim();
-        if (fin) {
-          gotFinal = true; lastPar = '';
-          const now = Date.now();
-          if (fin === lastFinal.t && now - lastFinal.at < 2500) return;    // the same final delivered twice
-          lastFinal = { t: fin, at: now };
-          emit('f', fin);
-          if (par) { lastPar = par; emit('p', par); }
-        } else if (par) { lastPar = par; emit('p', par); }
+        pet(); gotResult = true; quietSince = Date.now();
+        if (fails >= 2) emit('s', { state: 'listening' }); fails = 0;   // recovered: clear the note
+        const par = [];
+        for (let i = 0; i < e.results.length; i++) {
+          const r = e.results[i], t = clean(r[0] && r[0].transcript);
+          if (r.isFinal) {
+            if (done[i]) continue;
+            done[i] = true;
+            const n = fresh(t);
+            if (n) { said = clean(said + ' ' + n); lastPar = ''; emit('f', n); }
+          } else if (t) par.push(t);
+        }
+        // Android may also send growing copies of the same words as separate interim results: keep only the longest
+        const kept = par.filter((x, i) => !par.slice(i + 1).some(y => y.startsWith(x)));
+        lastPar = fresh(clean(kept.join(' ')));
+        emit('p', lastPar);
       };
       rec.onerror = e => { if (my === epoch) err = e.error; };
       let ended = false;
       function finish() {
         if (ended || my !== epoch) return; ended = true;
         clearTimeout(dog); rec = null;
-        // words heard but never finalised (common on Android, also an interim tail after a final): judge them as final
-        if (lastPar) emit('f', lastPar);
+        // words heard but never finalised (Chrome ended mid-phrase): judge them as final
+        if (lastPar) { emit('f', lastPar); lastPar = ''; }
         if (!want) return emit('s', { state: 'idle', reason: 'stopped' });
         if (FATAL[err]) return giveUp(FATAL[err]);
+        // nobody has said anything for a while: stop instead of restarting (and beeping) again and again
+        if (Date.now() - quietSince > QUIET) return giveUp('quiet');
         // a session with nothing heard because of a real problem counts as a failure; silence (no-speech) does not
-        if (!gotResult && (err === 'network' || err === 'audio-capture' || (err && err !== 'no-speech' && err !== 'aborted'))) fails++;
-        else if (!gotResult && !err) fails = Math.min(fails + 0.5, 3);   // ended instantly with nothing: slow down a little
-        if (fails >= 8) return giveUp(err === 'audio-capture' ? 'audio' : err === 'network' ? 'network' : 'error');
-        if (fails >= 2 && err) emit('s', { state: 'retrying', reason: err === 'audio-capture' ? 'audio' : err === 'network' ? 'network' : 'error' });
+        if (!gotResult && err && err !== 'no-speech' && err !== 'aborted') fails++;
+        else if (!gotResult && !err) fails = Math.min(fails + 0.5, 3);   // ended at once with nothing: slow down a little
+        if (fails >= 8) return giveUp(reasonOf(err));
+        if (fails >= 2 && err) emit('s', { state: 'retrying', reason: reasonOf(err) });
         clearTimeout(timer);
         timer = setTimeout(() => { if (want && !rec) { try { open(); } catch (x) { giveUp('error'); } } }, BACKOFF[Math.min(Math.floor(fails), BACKOFF.length - 1)]);
       }
       rec.onend = finish;
-      pet();
       rec.start();
     }
     return {
       start() {
         if (want) return;
-        want = true; fails = 0;
+        want = true; fails = 0; quietSince = Date.now();
         try { open(); } catch (e) { giveUp('error'); return false; }
         emit('s', { state: 'listening' }); return true;
       },
@@ -183,6 +198,7 @@
       onFinal(fn) { h.f.push(fn); }, onPartial(fn) { h.p.push(fn); }, onState(fn) { h.s.push(fn); },
     };
   }
+  const QUIET = TEST && params.has('quiet') ? +params.get('quiet') : 40000;   // ms of silence before listening pauses
   let L = null, wantListen = false, sayToken = 0, wake = null, hiddenWhileListening = false;
   const NOTES = {
     not_granted: 'Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap <b>Continue</b>.',
@@ -190,6 +206,7 @@
     network: 'Speech recognition needs internet. Check your connection and tap <b>Continue</b>.',
     audio: 'The microphone is not available — another app (or a call) may be using it. Close it and tap <b>Continue</b>.',
     error: 'Listening stopped unexpectedly. Tap <b>Continue</b> to carry on.',
+    quiet: 'Listening paused because it was quiet for a while. Tap <b>Continue</b> when you are ready.',
   };
   const RETRY = { network: 'No connection to speech recognition. Trying again…', audio: 'The microphone is busy (another app or a call?). Trying again…', error: 'Listening hiccup. Trying again…' };
   async function keepAwake(on) {
@@ -202,7 +219,7 @@
     if (!L) {
       L = makeListener();
       if (!L) { note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.'); return; }
-      L.onPartial(t => { if (!muted) { interim = t; thinkSoon(); } });
+      L.onPartial(t => { if (!muted) { interim = t; if (t) thinkSoon(); else render(); } });
       L.onFinal(t => { if (!muted) { heardFinal += ' ' + t; interim = ''; think(true); } });
       L.onState(({ state, reason }) => {
         if (muted) return;
@@ -267,7 +284,7 @@
     if (final) {
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
       if (d.commit != null) {
-        for (let i = res.a; i < d.commit; i++) mark(i, 'ok');
+        for (let i = pos; i < d.commit; i++) mark(i, 'ok');   // only new words: earlier ones keep what they were
         pos = Math.max(pos, d.commit); entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
         hideStop();
         if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
@@ -285,7 +302,7 @@
 
   // ---------- the muhaffiz stops you and says the right word ----------
   function correct(res, d, text) {
-    for (let i = res.a; i < d.stop; i++) mark(i, 'ok');
+    for (let i = pos; i < d.stop; i++) mark(i, 'ok');
     mark(d.stop, d.kind === 'ms' ? 'ms' : 'wr', d.heard);
     pos = d.stop; heardFinal = ''; interim = ''; live = null;
     addLog({ heard: text, at: `${res.a + 1}–${res.frontier + 1}`, result: (d.kind === 'ms' ? 'skipped ' : 'wrong ') + wordName(d.stop) + (d.heard ? ` (heard ${d.heard})` : '') });
@@ -342,7 +359,7 @@
       if (mode === 'self') st = W[i].st === 'wr' ? 'wr' : i < selfPtr ? 'ok' : 'p';
       if (st === 'p' && live && i >= live.a && i <= live.frontier) st = 'live';   // being recited right now
       if (st === 'p' && hints.has(i)) st = 'hint';
-      if (W[i].st === 'ok') ok++; else if (W[i].st === 'wr' || W[i].st === 'ms') wrong++; else if (W[i].st === 'fixed') fixed++;
+      if (W[i].st === 'ok') ok++; if (W[i].everWrong) wrong++; if (W[i].st === 'fixed') fixed++;   // a fixed mistake still counts as a mistake
       const c = 'w ' + st + (i === reach && (listening || mode === 'self') ? ' cur' : '');
       if (spans[i] && spans[i]._c !== c) { spans[i].className = c; spans[i]._c = c; }
     }

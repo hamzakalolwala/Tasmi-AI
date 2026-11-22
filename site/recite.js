@@ -150,15 +150,16 @@
     // heard words after the last matched word (a wrong word at the end, or a repeat)
     const lastOp = r.ops.map(o => o.t !== 'x' && o.t !== 'ms').lastIndexOf(true);
     const trail = r.ops.slice(lastOp + 1).filter(o => o.t === 'x').map(o => ({ k: H[o.h], raw: raw[o.h] }));
-    return { a, frontier, status, heard, trail, score: r.score, matched, H, raw, E, t0 };
+    return { a, pos, frontier, status, heard, trail, score: r.score, matched, H, raw, E, t0 };
   }
 
   /** What does the muhaffiz do?  final: the recogniser has settled this phrase.
    *  {stop: wi, kind: 'wr'|'ms', heard} to correct the reciter, or {commit: nextPos} to move on, or {none: true}. */
   function decide(res, passage, T, final) {
     if (!res) return { none: true };
-    const { a, frontier, status } = res;
-    for (let wi = a; wi <= frontier; wi++) {
+    const { a, frontier, status } = res, from = Math.max(a, res.pos != null ? res.pos : a);
+    // words before pos were already judged: going back over them (repeating, restarting the ayah) never stops on them
+    for (let wi = from; wi <= frontier; wi++) {
       const st = status[wi];
       if (st !== 'wr' && st !== 'ms') continue;
       // while words are still coming in, only stop once three later words were heard correctly after it
@@ -166,7 +167,7 @@
       if (!final) { let okAfter = 0; for (let x = wi + 1; x <= frontier; x++) if (status[x] === 'ok') okAfter++; if (okAfter < 3 || (st === 'ms' && T.filter(t => t.wi === wi).every(t => t.k.length <= 2))) return { none: true }; }
       return { stop: wi, kind: st, heard: res.heard[wi] || '' };
     }
-    if (final && res.trail.length && frontier + 1 < passage.length && frontier >= a) {
+    if (final && res.trail.length && frontier + 1 < passage.length && frontier >= a && frontier + 1 >= from) {
       // unmatched words at the end: a wrong word — unless they repeat what was just recited
       const recent = T.filter(t => t.wi >= Math.max(0, a - 8) && t.wi <= frontier + 1).map(t => t.k);
       const nextFree = T.some(t => t.wi === frontier + 1 && t.free);
