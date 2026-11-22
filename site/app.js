@@ -133,7 +133,9 @@
     function giveUp(reason) { want = false; epoch++; clearTimeout(timer); clearTimeout(dog); if (rec) { try { rec.abort(); } catch (e) {} rec = null; } emit('s', { state: 'idle', reason }); }
     function open() {
       const my = ++epoch;
-      gapAt = Date.now();                       // (re)opening the microphone: words said just now may not be recorded
+      // (re)opening the microphone: words said just now may not be recorded. In the Android app the native side
+      // reports real gaps itself (none while it records the mic itself)
+      if (!window.TasmiNative) gapAt = Date.now();
       first = false;
       let gotResult = false, err = null, lastPar = '';
       const done = [];            // result indexes already passed on as final
@@ -282,7 +284,8 @@
     }
     const res = Recite.assess(T, passage, pos, text);
     // a phrase that began just after a microphone restart may have lost its first word: not a skip
-    const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500);
+    // (never for the word just corrected: skipping it again is a real skip)
+    const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500) && !(W[pos] && W[pos].everWrong);
     const d = Recite.decide(res, passage, T, final, { softStart });
     live = res && res.frontier >= res.a ? res : null;
     if (d.stop != null) {

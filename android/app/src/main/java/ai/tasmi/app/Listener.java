@@ -60,7 +60,8 @@ final class Listener {
     private String lang = "ar-SA";
     private int mode = Build.VERSION.SDK_INT >= 33 ? STREAM : RESTART;
     private boolean modeWorked;                         // the current mode has produced words at least once
-    private int fails, busy, deafTicks;
+    private int fails, busy, deafTicks, earlyFails;
+    private long modeAt;                                 // when the current mode was first started
     private long lastSpeech, sessionAt, lastWords;
     private String lastPartial = "";
     private int generation;
@@ -74,6 +75,11 @@ final class Listener {
             // STREAM: the mic hears a voice but the recogniser writes nothing — it does not take our audio
             if (mode == STREAM && !modeWorked && now - sessionAt > 3000 && mic.quietMs() < 1200 && ++deafTicks >= 5) {
                 stepDown("the recogniser heard nothing from the app's microphone");
+                return;
+            }
+            // …or the mic level never says "speech" on this phone: no words at all for 25 s although something was heard
+            if (mode == STREAM && !modeWorked && now - modeAt > 25_000 && mic.quietMs() < 25_000) {
+                stepDown("no words in 25 s from the app's microphone");
                 return;
             }
             // STREAM: it worked, but now the voice goes on and no words come: the session hung — start a new one
@@ -102,8 +108,10 @@ final class Listener {
         fails = 0;
         busy = 0;
         lastSpeech = SystemClock.elapsedRealtime();
+        if (!modeWorked) { modeAt = lastSpeech; earlyFails = 0; }
         mute(true);
         ev.mode(NAMES[mode], "start");
+        if (mode == RESTART) ev.gap();                  // the recogniser opening its mic takes a moment
         open();
         main.removeCallbacks(tick);
         main.postDelayed(tick, 1000);
@@ -137,6 +145,8 @@ final class Listener {
         mode++;
         modeWorked = false;
         deafTicks = 0;
+        earlyFails = 0;
+        modeAt = SystemClock.elapsedRealtime();
         if (mode != STREAM) mic.stop();
         ev.mode(NAMES[mode], why);
         destroy();
@@ -213,7 +223,7 @@ final class Listener {
                 if (mode == RESTART) { main.removeCallbacks(stuck); main.postDelayed(stuck, STUCK_MS); }   // still alive
                 return true;
             }
-            @Override public void onReadyForSpeech(Bundle b) { if (current()) busy = 0; }
+            @Override public void onReadyForSpeech(Bundle b) { if (current()) { busy = 0; if (mode == STREAM) mic.releaseReadSide(); } }
             @Override public void onBeginningOfSpeech() { if (current()) lastSpeech = SystemClock.elapsedRealtime(); }
             @Override public void onRmsChanged(float v) { }
             @Override public void onBufferReceived(byte[] b) { }
@@ -260,12 +270,15 @@ final class Listener {
                 if (!current()) return;
                 generation++;
                 flushPartial();
-                // a long-session mode the phone's recogniser can't do: it fails before it ever heard a word
-                if (mode != RESTART && !modeWorked && SystemClock.elapsedRealtime() - sessionAt < 4000
-                        && code != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS && code != SpeechRecognizer.ERROR_NETWORK
-                        && code != SpeechRecognizer.ERROR_NETWORK_TIMEOUT) {
-                    stepDown("recogniser error " + code + " in " + NAMES[mode] + " mode");
-                    return;
+                // a long-session mode the phone's recogniser can't do. "Not supported" errors (12–15) say so at once;
+                // ordinary hiccups (busy, client, server, no match…) only after 3 in a row before any word was heard
+                if (mode != RESTART && !modeWorked && code != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS
+                        && code != SpeechRecognizer.ERROR_NETWORK && code != SpeechRecognizer.ERROR_NETWORK_TIMEOUT) {
+                    boolean unsupported = code >= 12 && code <= 15;
+                    if (unsupported || (SystemClock.elapsedRealtime() - sessionAt < 4000 && ++earlyFails >= 3)) {
+                        stepDown("recogniser error " + code + " in " + NAMES[mode] + " mode");
+                        return;
+                    }
                 }
                 switch (code) {
                     case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
@@ -307,7 +320,7 @@ final class Listener {
             ParcelFileDescriptor source = mode == STREAM ? mic.newSession() : null;
             sr.startListening(intent(source));
         } catch (Exception e) {
-            if (mode != RESTART && !modeWorked) { stepDown("could not start " + NAMES[mode] + " mode"); return; }
+            if (mode != RESTART && !modeWorked && ++earlyFails >= 2) { stepDown("could not start " + NAMES[mode] + " mode"); return; }
             busy++;
             if (busy > 12) finish("error"); else again(600, true);
         }

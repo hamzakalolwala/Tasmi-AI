@@ -20,7 +20,7 @@ final class Mic {
     private static final int BYTES_PER_MS = RATE * 2 / 1000;
     private static final int RING = RATE * 2 * 8;        // 8 s of audio
     private static final int REPLAY_MS = 3000;           // replay at most this much into a new session
-    private static final int OVERLAP_MS = 1000;
+    private static final int OVERLAP_MS = 2500;
 
     private final byte[] ring = new byte[RING];
     private long written;                                // total bytes recorded (position in the ring = written % RING)
@@ -28,6 +28,7 @@ final class Mic {
     private AudioRecord rec;
     private Thread capture, feeder;
     private volatile boolean running;
+    private int run;                                     // which start() the threads belong to
     private volatile OutputStream sink;                  // the current session's pipe
     private ParcelFileDescriptor readSide;
     private volatile long lastLoud;                      // when the reciter's voice was last heard (by level)
@@ -47,16 +48,20 @@ final class Mic {
             return false;
         }
         running = true;
-        synchronized (ring) { written = 0; consumed = 0; }
-        capture = new Thread(this::captureLoop, "tasmi-mic");
+        final int myRun;
+        synchronized (ring) { written = 0; consumed = 0; myRun = ++run; }
+        final AudioRecord r = rec;
+        // each thread keeps its own recorder and run: after a quick stop() and start() the old ones just end
+        capture = new Thread(() -> captureLoop(r, myRun), "tasmi-mic");
         capture.start();
-        feeder = new Thread(this::feedLoop, "tasmi-feed");
+        feeder = new Thread(() -> feedLoop(myRun), "tasmi-feed");
         feeder.start();
         return true;
     }
 
     void stop() {
         running = false;
+        synchronized (ring) { run++; }
         endSession();
         if (rec != null) {
             try { rec.stop(); } catch (Exception ignored) { }
@@ -78,7 +83,8 @@ final class Mic {
         ParcelFileDescriptor[] p = ParcelFileDescriptor.createPipe();
         synchronized (ring) {
             // replay what the previous session missed (the reciter may have started the next ayah meanwhile)
-            // and 1 s before it: the old session may not have read the end of what it was sent (a repeated word is fine)
+            // and 2.5 s before it: the old session may not have read the end of what it was sent (a pipe holds ~2 s;
+            // a repeated word is fine)
             consumed = Math.max(consumed - (long) OVERLAP_MS * BYTES_PER_MS, written - (long) REPLAY_MS * BYTES_PER_MS);
             consumed = Math.max(consumed, 0);
             consumed = Math.max(consumed, written - RING + 1);
@@ -89,6 +95,13 @@ final class Mic {
         return p[0];
     }
 
+    /** the recogniser has its own copy of the read side now: drop ours, so a session it closes shows up as an error */
+    void releaseReadSide() {
+        ParcelFileDescriptor r;
+        synchronized (ring) { r = readSide; readSide = null; }
+        if (r != null) { try { r.close(); } catch (Exception ignored) { } }
+    }
+
     /** the session is over (its result came, or it failed): stop feeding it; recording carries on */
     void endSession() {
         OutputStream s; ParcelFileDescriptor r;
@@ -97,15 +110,17 @@ final class Mic {
         if (r != null) { try { r.close(); } catch (Exception ignored) { } }
     }
 
-    private void captureLoop() {
+    private boolean mine(int myRun) { synchronized (ring) { return running && run == myRun; } }
+
+    private void captureLoop(AudioRecord r, int myRun) {
         byte[] buf = new byte[BYTES_PER_MS * 20];       // 20 ms chunks
-        while (running) {
-            AudioRecord r = rec;
-            if (r == null) break;
-            int n = r.read(buf, 0, buf.length);
+        while (mine(myRun)) {
+            int n;
+            try { n = r.read(buf, 0, buf.length); } catch (Exception e) { break; }
             if (n <= 0) { if (n < 0) SystemClock.sleep(10); continue; }
-            if (level(buf, n) > 900) lastLoud = SystemClock.elapsedRealtime();
+            if (level(buf, n) > 300) lastLoud = SystemClock.elapsedRealtime();   // speech (VOICE_RECOGNITION has no gain)
             synchronized (ring) {
+                if (run != myRun) break;
                 for (int i = 0; i < n; i++) ring[(int) ((written + i) % RING)] = buf[i];
                 written += n;
                 ring.notifyAll();
@@ -113,15 +128,15 @@ final class Mic {
         }
     }
 
-    private void feedLoop() {
+    private void feedLoop(int myRun) {
         byte[] out = new byte[BYTES_PER_MS * 40];
-        while (running) {
+        while (true) {
             OutputStream s; int n;
             synchronized (ring) {
-                while (running && (sink == null || consumed >= written)) {
+                while (running && run == myRun && (sink == null || consumed >= written)) {
                     try { ring.wait(200); } catch (InterruptedException e) { return; }
                 }
-                if (!running) return;
+                if (!running || run != myRun) return;
                 s = sink;
                 if (consumed < written - RING + 1) consumed = written - RING + 1;   // fell behind: skip the oldest
                 n = (int) Math.min(out.length, written - consumed);

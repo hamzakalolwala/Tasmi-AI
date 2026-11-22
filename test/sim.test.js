@@ -328,3 +328,17 @@ test('android: the recogniser stops at every breath and is slow to restart — a
   assert.ok(r.log.length >= 1);
   await p.close();
 });
+
+test('desktop: skipping the same word again right after its correction is still a skip', async () => {
+  const p = await open('desktop', { unit: 'range', surah: 2, from: 2, to: 5 });
+  const r = await p.evaluate(async () => {
+    const ph = phrasesOf(0, __app.passage.length);
+    const skip = [...ph[0]]; skip.splice(3, 1);             // ذلك الكتاب لا … فيه: ريب skipped
+    await reciteAll([skip]);
+    const first = __spoken.length;
+    await reciteAll([ph[0].slice(4)]);                     // straight after the correction, skips ريب again
+    return { first, second: __spoken.length, pos: __app.pos };
+  });
+  assert.deepStrictEqual(r, { first: 1, second: 2, pos: 3 });
+  await p.close();
+});
