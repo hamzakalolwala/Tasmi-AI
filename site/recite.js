@@ -112,14 +112,15 @@
       const g = H.slice(i, i + k).join(' '); ET = ET || ' ' + T.map(t => t.k).join(' ') + ' ';
       if (!ET.includes(' ' + g + ' ' + g + ' ')) for (let x = 0; x < k; x++) keep[i + x] = false;
     }
-    return keep.includes(false) ? { H: H.filter((_, i) => keep[i]), raw: raw.filter((_, i) => keep[i]) } : { H, raw };
+    const idx = H.map((_, i) => i).filter(i => keep[i]);            // where each kept word was in what was heard
+    return keep.includes(false) ? { H: H.filter((_, i) => keep[i]), raw: raw.filter((_, i) => keep[i]), idx } : { H, raw, idx };
   }
 
   function assess(T, passage, pos, heardRaw) {
     let H = Array.isArray(heardRaw) ? heardRaw : words(heardRaw);
     let raw = Array.isArray(heardRaw) ? heardRaw : prep(heardRaw);
     if (!H.length) return null;
-    ({ H, raw } = dropRepeats(T, H, raw));
+    let idx; ({ H, raw, idx } = dropRepeats(T, H, raw));
     const tokAt = wi => T.findIndex(t => t.wi >= wi);
     pos = Math.max(0, Math.min(pos, passage.length));
     if (pos >= passage.length) return { a: pos, frontier: pos - 1, status: {}, trail: raw, score: -H.length, matched: 0, H, raw };
@@ -134,11 +135,11 @@
       if (!best || sc > best.sc) best = { a, t0, E, r, sc };
     }
     const { a, t0, E, r } = best;
-    const tokSt = {}, heardAt = {};
+    const tokSt = {}, heardAt = {}, hOfTok = {};
     let lastOk = -1;
-    for (const o of r.ops) if (o.e != null) { tokSt[o.e] = o.t; if (o.h != null) heardAt[o.e] = raw[o.h]; if (o.t === 'ok' || o.t === 'wr') lastOk = Math.max(lastOk, o.e); }
+    for (const o of r.ops) if (o.e != null) { tokSt[o.e] = o.t; if (o.h != null) { heardAt[o.e] = raw[o.h]; hOfTok[o.e] = idx[o.h]; } if (o.t === 'ok' || o.t === 'wr') lastOk = Math.max(lastOk, o.e); }
     // per display word: ok if all its spoken words are ok
-    const status = {}, heard = {}; let frontier = a - 1, matched = 0;
+    const status = {}, heard = {}, hOf = {}; let frontier = a - 1, matched = 0;
     for (let e = 0; e <= lastOk; e++) {
       const wi = E[e].wi, st = tokSt[e];
       if (st === 'ok' && !E[e].free) matched++;
@@ -146,11 +147,12 @@
       const prev = status[wi];
       status[wi] = !prev ? st : prev === 'ok' ? st : prev === 'ms' && st === 'ok' ? 'wr' : prev;
       if (heardAt[e]) heard[wi] = (heard[wi] ? heard[wi] + ' ' : '') + heardAt[e];
+      if (hOfTok[e] != null) hOf[wi] = Math.max(hOf[wi] ?? -1, hOfTok[e]);   // the last heard word that matched it
     }
     // heard words after the last matched word (a wrong word at the end, or a repeat)
     const lastOp = r.ops.map(o => o.t !== 'x' && o.t !== 'ms').lastIndexOf(true);
     const trail = r.ops.slice(lastOp + 1).filter(o => o.t === 'x').map(o => ({ k: H[o.h], raw: raw[o.h] }));
-    return { a, pos, frontier, status, heard, trail, score: r.score, matched, H, raw, E, t0 };
+    return { a, pos, frontier, status, heard, hOf, trail, score: r.score, matched, H, raw, E, t0 };
   }
 
   /** What does the muhaffiz do?  final: the recogniser has settled this phrase.
@@ -206,6 +208,6 @@
     return n >= 3 ? raw.slice(n).join(' ') : raw.join(' ');
   }
 
-  const API = { norm, same, words, tokens, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
+  const API = { norm, same, words, prep, tokens, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.Recite = API;
 })(typeof self !== 'undefined' ? self : this);

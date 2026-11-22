@@ -171,8 +171,10 @@ test('words light up while being recited (before the phrase is final)', async ()
   await startTasmi(p);
   await p.evaluate(async () => { const sr = await (async () => { for (let i = 0; i < 100 && !window.__sr; i++) await new Promise(r => setTimeout(r, 10)); return window.__sr; })(); sr.emit(sp(0, 6), false); });
   await p.waitForTimeout(50);
-  const live = await p.evaluate(() => [...document.querySelectorAll('#mushaf .w.live')].length);
-  assert.strictEqual(live, 6);
+  // words being heard light up; the first ones are already confirmed (green) while the phrase goes on
+  const r = await p.evaluate(() => ({ live: document.querySelectorAll('#mushaf .w.live').length, ok: document.querySelectorAll('#mushaf .w.ok').length }));
+  assert.ok(r.live >= 3, JSON.stringify(r));
+  assert.strictEqual(r.live + r.ok, 6);
   await p.close();
 });
 

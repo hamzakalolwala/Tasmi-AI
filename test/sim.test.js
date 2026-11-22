@@ -342,3 +342,35 @@ test('desktop: skipping the same word again right after its correction is still 
   assert.deepStrictEqual(r, { first: 1, second: 2, pos: 3 });
   await p.close();
 });
+
+// Hamza's phone (Android 15, app in stream mode) sent the whole of al-Fatiha as ONE phrase, final only at the end.
+test('Android app, one phrase for a whole page: progress moves while reciting, each check stays small, a mistake is caught', async () => {
+  for (const withMistake of [false, true]) {
+    const p = await openNative({ unit: 'page', page: 3 });
+    const r = await p.evaluate(async withMistake => {
+      delete window.__spoken;
+      let maxWords = 0; const orig = Recite.assess;
+      Recite.assess = (...a) => { maxWords = Math.max(maxWords, Recite.prep(a[3]).length); return orig(...a); };
+      const words = []; for (let i = 0; i < __app.passage.length; i++) { const [x, k] = __app.passage[i]; words.push([].concat(__app.S[x].i[k])); }
+      const bad = 60;                                       // a wrong word in the middle of the page
+      const said = words.map((w, i) => withMistake && i === bad ? ['السماوات'] : w).flat();
+      let mid = -1;
+      for (let i = 1; i <= said.length; i++) {
+        if (!__native.on) break;                            // stopped for the mistake
+        nativeEvent({ type: 'partial', text: said.slice(0, i).join(' ') });
+        await new Promise(r => setTimeout(r, 25));
+        if (i === Math.floor(said.length / 2)) mid = __app.pos;
+      }
+      await new Promise(r => setTimeout(r, 1200));
+      if (!withMistake) nativeEvent({ type: 'final', text: said.join(' ') });   // the phrase ends with the page
+      await new Promise(r => setTimeout(r, 300));
+      return { maxWords, mid, pos: __app.pos, n: __app.passage.length, spoken: __native.spoken.length, stop: __app.stop && __app.stop.i, bad, total: said.length };
+    }, withMistake);
+    assert.deepStrictEqual(p.errs, []);
+    assert.ok(r.mid > 20, 'progress moved while reciting: ' + r.mid);
+    assert.ok(r.maxWords < 45, `each check looked at ${r.maxWords} words (of ${r.total})`);
+    if (withMistake) assert.deepStrictEqual([r.spoken, r.stop], [1, r.bad]);
+    else assert.deepStrictEqual([r.spoken, r.pos], [0, r.n]);
+    await p.close();
+  }
+});

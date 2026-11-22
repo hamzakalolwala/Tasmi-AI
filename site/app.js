@@ -115,7 +115,7 @@
   }
   function reset() {
     W = passage.map(() => ({ st: 'p', everWrong: false, heard: '' }));
-    pos = 0; selfPtr = 0; hints = new Set(); heardFinal = ''; interim = ''; live = null; hideStop(); render();
+    pos = 0; selfPtr = 0; hints = new Set(); heardFinal = ''; interim = ''; dropN = 0; live = null; hideStop(); render();
   }
 
   // ---------- the listener: the browser's speech recognition, restarted after every phrase ----------
@@ -204,7 +204,7 @@
     };
   }
   const QUIET = TEST && params.has('quiet') ? +params.get('quiet') : 40000;   // ms of silence before listening pauses
-  let gapAt = 0, phraseAt = 0;
+  let gapAt = 0, phraseAt = 0, phrasePos = -1;   // when and where (in the passage) the current phrase began
   window.__tasmiMode = (m, why) => addLog({ heard: '', result: `listening mode: ${m} (${why})` });
   let L = null, wantListen = false, sayToken = 0, wake = null, hiddenWhileListening = false;
   const NOTES = {
@@ -231,8 +231,8 @@
     if (!L) {
       L = makeListener();
       if (!L) { note('This browser has no speech recognition. Open the page in <b>Google Chrome</b>, or use <b>Self-check</b>.'); return; }
-      L.onPartial(t => { if (!muted) { if (t && !interim && !heardFinal.trim()) phraseAt = Date.now(); interim = t; if (t) thinkSoon(); else render(); } });
-      L.onFinal(t => { if (!muted) { if (!interim && !heardFinal.trim()) phraseAt = Date.now(); heardFinal += ' ' + t; interim = ''; think(true); } });
+      L.onPartial(t => { if (!muted) { if (t && !interim && !heardFinal.trim()) { phraseAt = Date.now(); phrasePos = pos; } interim = t; if (t) thinkSoon(); else render(); } });
+      L.onFinal(t => { if (!muted) { if (!interim && !heardFinal.trim()) { phraseAt = Date.now(); phrasePos = pos; } heardFinal += ' ' + t; interim = ''; think(true); } });
       L.onState(({ state, reason }) => {
         if (muted) return;
         if (state === 'retrying') note(RETRY[reason] || RETRY.error, true);
@@ -245,7 +245,7 @@
         setMain(); status();
       });
     }
-    note(''); heardFinal = ''; interim = '';
+    note(''); heardFinal = ''; interim = ''; dropN = 0;
     wantListen = true;
     if (L.start() === false) { wantListen = false; note(NOTES.error, true); }
     else { listening = true; keepAwake(true); }
@@ -267,7 +267,7 @@
   });
 
   // ---------- each time words come in: where are we, and is anything wrong? ----------
-  let thinkQ = 0, pending = null, pendingT = 0;
+  let thinkQ = 0, pending = null, pendingT = 0, dropN = 0;
   const HOLD = TEST && params.has('hold') ? +params.get('hold') : 800;   // ms an interim mistake must hold before stopping
   function thinkSoon() { if (thinkQ) return; thinkQ = requestAnimationFrame(() => { thinkQ = 0; if (interim) think(false); }); }
   function think(final) {
@@ -279,13 +279,19 @@
     for (let i = Math.max(0, pos - 8); i <= Math.min(pos, passage.length - 1); i++) { const x = S[passage[i][0]]; if (x.sn === 1 && x.an <= 2) fatiha = true; }
     const text = fatiha ? said : Recite.withoutPreamble(said);
     if (!fatiha && (!text || Recite.isPreamble(said))) {
-      if (final) { addLog({ heard: said, result: 'basmala / isti\'adha — ignored' }); heardFinal = ''; live = null; render(); }
+      if (final) { addLog({ heard: said, result: 'basmala / isti\'adha — ignored' }); heardFinal = ''; live = null; dropN = 0; render(); }
       return;
     }
-    const res = Recite.assess(T, passage, pos, text);
+    // words already confirmed while this phrase was still going on are not looked at again (a long phrase — Android
+    // may send a whole page as one — would otherwise get slower to check with every word)
+    const all = Recite.prep(text);
+    if (dropN > all.length) dropN = 0;
+    const res = Recite.assess(T, passage, pos, all.slice(dropN).join(' '));
     // a phrase that began just after a microphone restart may have lost its first word: not a skip
-    // (never for the word just corrected: skipping it again is a real skip)
-    const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500) && !(W[pos] && W[pos].everWrong);
+    // (only at the very start of the phrase — not after words of it were confirmed — and never for the word just
+    // corrected: skipping it again is a real skip)
+    const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500) && pos === phrasePos
+      && !(W[pos] && W[pos].everWrong);
     const d = Recite.decide(res, passage, T, final, { softStart });
     live = res && res.frontier >= res.a ? res : null;
     if (d.stop != null) {
@@ -294,7 +300,18 @@
       const key = d.stop + '|' + d.kind + '|' + d.heard, now = Date.now();
       if (!pending || pending.key !== key) { pending = { key, since: now }; clearTimeout(pendingT); pendingT = setTimeout(() => { if (pending && pending.key === key && interim && !muted) think(false); }, HOLD + 30); }
       else if (now - pending.since >= HOLD) { pending = null; return correct(res, d, text); }
-    } else if (!final) pending = null;
+    } else if (!final) {
+      pending = null;
+      // confirm the words that are clearly done: right, with 4 more right words after them
+      if (res && res.frontier - pos >= 4) {
+        let c = pos; while (c < res.frontier - 3 && res.status[c] === 'ok') c++;
+        if (c - pos >= 2 && res.hOf[c - 1] != null) {
+          for (let i = pos; i < c; i++) mark(i, 'ok');
+          pos = c;
+          dropN += Math.max(0, res.hOf[c - 1] + 1 - 3);   // keep the last 3 heard words: the recogniser may still rewrite them
+        }
+      }
+    }
     if (final) pending = null;
     if (final) {
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
@@ -306,7 +323,7 @@
         if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
       } else { entry.result = 'did not match the passage'; if (pos > 0) toastNote(`That didn't match. Carry on from <b>${esc(wordName(pos))}</b>.`); }
       addLog(entry);
-      heardFinal = ''; live = null;
+      heardFinal = ''; live = null; dropN = 0;
     }
     render();
   }
@@ -320,7 +337,7 @@
   function correct(res, d, text) {
     for (let i = pos; i < d.stop; i++) mark(i, 'ok');
     mark(d.stop, d.kind === 'ms' ? 'ms' : 'wr', d.heard);
-    pos = d.stop; heardFinal = ''; interim = ''; live = null;
+    pos = d.stop; heardFinal = ''; interim = ''; live = null; dropN = 0;
     addLog({ heard: text, at: `${res.a + 1}–${res.frontier + 1}`, result: (d.kind === 'ms' ? 'skipped ' : 'wrong ') + wordName(d.stop) + (d.heard ? ` (heard ${d.heard})` : '') });
     stop = { i: d.stop, kind: d.kind, heard: d.heard };
     $('stopCard').className = 'show';
@@ -348,7 +365,7 @@
     const resume = () => {
       if (my !== sayToken) return;                    // a newer word is being said, or listening was stopped
       muted = false;
-      if (wantListen && mode === 'mic' && document.visibilityState !== 'hidden') { heardFinal = ''; interim = ''; if (L.start() === false) { wantListen = false; listening = false; note(NOTES.error, true); } else listening = true; }
+      if (wantListen && mode === 'mic' && document.visibilityState !== 'hidden') { heardFinal = ''; interim = ''; dropN = 0; if (L.start() === false) { wantListen = false; listening = false; note(NOTES.error, true); } else listening = true; }
       else listening = false;
       setMain(); status(); render();
     };
