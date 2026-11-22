@@ -2,13 +2,13 @@
 // phrase, then the recogniser ends and is restarted). node --test test/app.test.js
 const test = require('node:test');
 const assert = require('node:assert');
-const { chromium } = require(process.env.PLAYWRIGHT || '/opt/npm-tools/node_modules/playwright');
+const { chromium } = (() => { for (const m of [process.env.PLAYWRIGHT, 'playwright', '/opt/npm-tools/node_modules/playwright', '/opt/node-tools/node_modules/playwright']) { if (!m) continue; try { return require(m); } catch (e) {} } throw new Error('Playwright not found: set PLAYWRIGHT'); })();
 const { start } = require('./server');
 
 let srv, browser, base;
 test.before(async () => {
   srv = await start(0); base = `http://127.0.0.1:${srv.address().port}`;
-  browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+  browser = await chromium.launch({ executablePath: process.env.CHROME || (require('fs').existsSync('/usr/bin/google-chrome') ? '/usr/bin/google-chrome' : undefined), args: ['--no-sandbox'] });
 });
 test.after(async () => { await browser?.close(); srv?.close(); });
 
