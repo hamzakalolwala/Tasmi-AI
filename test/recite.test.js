@@ -26,11 +26,11 @@ test('THE BUG: wrong word in the middle of an ayah → stop on that word (not th
   const h = spoken(P, s, s + 7).split(' '); h[3] = 'شك';               // لا شك instead of لا ريب
   assert.deepStrictEqual(step(P, s, h.join(' ')), { stop: s + 3, kind: 'wr', heard: 'شك' });
 });
-test('…and caught early, while still reciting, once two more words are heard', () => {
+test('…and caught early, while still reciting, once three more words are heard', () => {
   const P = passageOf(2, 1, 5), s = ayahStart(P, 2);
-  const h = spoken(P, s, s + 7).split(' '); h[3] = 'شك';
-  assert.deepStrictEqual(step(P, s, h.slice(0, 5).join(' '), false), { none: true });      // only one word after it
-  assert.strictEqual(step(P, s, h.slice(0, 6).join(' '), false).stop, s + 3);              // two words after it
+  const h = spoken(P, s, s + 9).split(' '); h[3] = 'شك';
+  assert.deepStrictEqual(step(P, s, h.slice(0, 6).join(' '), false), { none: true });      // two words after it: Chrome may still rewrite
+  assert.strictEqual(step(P, s, h.slice(0, 7).join(' '), false).stop, s + 3);              // three words after it
 });
 test('after a correction, carrying on from the corrected word works', () => {
   const P = passageOf(2, 1, 5), s = ayahStart(P, 2), e = ayahStart(P, 3);
@@ -118,4 +118,83 @@ test('a different word that looks similar is a mistake (بالقلب for بال�
   assert.strictEqual(step(P, 0, 'الذين يؤمنون بالقلب ويقيمون الصلاة ومما رزقناهم ينفقون').stop, 2);
   assert.strictEqual(R.same(R.norm('يعلمون'), R.norm('يعملون')), false);
   assert.strictEqual(R.same(R.norm('الصلاه'), R.norm('الصلوة')), true);   // spelling only
+});
+
+// ---------- what speech recognition really writes: none of this is a mistake ----------
+const ok = (P, heard, commit) => assert.deepStrictEqual(step(P, 0, heard), { commit }, heard);
+test('a held madd (الرحيييم) is the same word', () => ok(passageOf(1, 1, 1), 'بسم الله الرحمن الرحيييم', 4));
+test('filler sounds (آآ، امم) are ignored', () => {
+  ok(passageOf(112, 1, 1), 'قل هو آآ الله أحد', 4);
+  ok(passageOf(112, 1, 1), 'قل هو الله أحد امم', 4);
+});
+test('a detached و (و قال) and a word merged with the next one (وماأدراك) still match', () => {
+  ok(passageOf(77, 8, 9), 'فإذا النجوم طمست و إذا السماء فرجت', 6);
+  ok(passageOf(101, 3, 3), 'وماأدراك ما القارعة', 4);
+});
+test('digits written for a number word match it', () => ok(passageOf(112, 1, 1), 'قل هو الله ١', 4));
+test('saying a few words twice in a row is not a mistake', () => ok(passageOf(93, 9, 9), 'فأما اليتيم فلا تقهر فلا تقهر', 4));
+test('…but a passage that itself repeats words still needs both copies', () => {
+  const P = passageOf(94, 5, 6);
+  ok(P, spoken(P, 0, P.passage.length), P.passage.length);
+});
+test('real mistakes stay mistakes: عن/إن, قل/كل, a different word with the same letters', () => {
+  assert.strictEqual(R.same(R.norm('عن'), R.norm('إن')), false);
+  assert.strictEqual(R.same(R.norm('قل'), R.norm('كل')), false);
+  assert.strictEqual(R.same(R.norm('يعلمون'), R.norm('يعملون')), false);
+  const P = passageOf(112, 1, 1);
+  assert.strictEqual(step(P, 0, 'كل هو الله أحد').stop, 0);
+});
+
+test('every ayah of the whole Quran, recited correctly, is never stopped (final and interim)', () => {
+  const bad = [];
+  for (let sn = 1; sn <= 114; sn++) {
+    const n = surah(sn).length;
+    for (let an = 1; an <= n; an += 3) {                       // 3 ayat at a time, as one passage
+      const P = passageOf(sn, an, Math.min(n, an + 2));
+      let pos = 0;
+      for (const [ai] of P.S.entries()) {
+        const s = P.passage.findIndex(([x]) => x === ai), e = P.passage.findIndex(([x]) => x > ai), end = e < 0 ? P.passage.length : e;
+        const text = spoken(P, s, end), w = text.split(' ');
+        for (let k = 1; k < w.length; k++) { const d = step(P, pos, w.slice(0, k).join(' '), false); if (d.stop != null) { bad.push(`${sn}:${an + ai} interim @${d.stop}`); break; } }
+        const d = step(P, pos, text);
+        if (d.commit !== end) { bad.push(`${sn}:${an + ai} ${JSON.stringify(d)}`); pos = end; } else pos = d.commit;
+      }
+    }
+  }
+  assert.deepStrictEqual(bad, []);
+});
+
+test('just after a microphone restart, 1–2 missing words at the start of the phrase are not a skip — anything else still is', () => {
+  const P = passageOf(2, 2, 5), s = ayahStart(P, 4), e = ayahStart(P, 5), w = spoken(P, s, e).split(' ');
+  const soft = (heard, opts) => R.decide(R.assess(P.T, P.passage, s, heard), P.passage, P.T, true, opts);
+  assert.deepStrictEqual(soft(w.slice(1).join(' '), { softStart: true }), { commit: e, soft: s });       // first word lost
+  assert.deepStrictEqual(soft(w.slice(2).join(' '), { softStart: true }), { commit: e, soft: s });       // two lost
+  assert.strictEqual(soft(w.slice(1).join(' ')).stop, s, 'no restart just before: a real skip');
+  const mid = [...w]; mid.splice(4, 1);
+  assert.strictEqual(soft(mid.join(' '), { softStart: true }).stop, s + 4, 'a skip later in the phrase is still a skip');
+  const wrong = [...w]; wrong[0] = 'والكتاب';
+  assert.strictEqual(soft(wrong.join(' '), { softStart: true }).stop, s, 'a wrong first word is still wrong');
+});
+
+test('a word the Quran model heard said right is not a mistake (Google misheard it)', () => {
+  const P = passageOf(2, 2, 2), w = spoken(P, 0, P.passage.length).split(' '); w[3] = 'شك';
+  const res = R.assess(P.T, P.passage, 0, w.join(' '));
+  assert.strictEqual(R.decide(res, P.passage, P.T, true).stop, 3);
+  assert.deepStrictEqual(R.decide(res, P.passage, P.T, true, { vetoed: new Set([3]) }), { commit: P.passage.length });
+});
+test('Quran model second opinion: said / not said / can\'t tell', () => {
+  const P = passageOf(2, 2, 3);
+  const right = 'ذَلِكَ الْكِتَابُ لَا رَيْبَ فِيهِ هُدًى لِلْمُتَّقِينَ الَّذِينَ يُؤْمِنُونَ';
+  assert.strictEqual(R.confirm(P.T, 3, right).said, 'said');
+  assert.strictEqual(R.confirm(P.T, 3, right.replace('رَيْبَ', 'شَكَّ')).said, 'not');
+  assert.strictEqual(R.confirm(P.T, 3, right.replace('رَيْبَ ', '')).said, 'not', 'skipped');
+  assert.strictEqual(R.confirm(P.T, 3, 'الَّذِينَ يُؤْمِنُونَ').said, 'unknown', 'the model\'s audio does not reach that word');
+  assert.strictEqual(R.confirm(P.T, 3, '').said, 'unknown');
+});
+
+test('Quran model: a word skipped after going back to repeat is still a skip (only the latest pass counts)', () => {
+  const P = passageOf(1, 1, 7), wi = P.passage.findIndex(([ai, k]) => P.S[ai].an === 5 && k === 2);   // وإياك
+  const t = 'إياك نعبد وإياك نستعين اهدنا الصراط المستقيم إياك نعبد نستعين اهدنا الصراط';
+  assert.strictEqual(R.confirm(P.T, wi, t).said, 'not');
+  assert.strictEqual(R.confirm(P.T, wi, 'إياك نعبد وإياك نستعين اهدنا الصراط').said, 'said');
 });

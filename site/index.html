@@ -48,7 +48,7 @@ input.n{width:72px}
 .hide .w.live,.w.live{color:#2f7d55;background:var(--green2)}
 .hide .w.hint,.w.hint{color:var(--blue);background:var(--blue2)}
 .heard{direction:rtl;font-size:15px;color:var(--mute);margin-top:8px;min-height:1.4em}
-.w.fixed{color:var(--green);text-decoration:underline wavy var(--red);text-underline-offset:7px}
+.w.fixed{color:var(--amber);background:var(--amber2);text-decoration:underline wavy var(--red);text-underline-offset:7px}
 .w.cur{outline:2px solid var(--gold);outline-offset:1px}
 .am{display:inline-flex;align-items:center;justify-content:center;min-width:1.25em;height:1.25em;font-size:.6em;border:1.5px solid var(--gold);border-radius:50%;color:var(--gold);margin:0 4px;line-height:1;vertical-align:middle;padding:0 .2em}
 .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-top:8px}
@@ -126,7 +126,7 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
     <span><b style="background:var(--green)"></b>Correct</span>
     <span><b style="background:#9fd3b5"></b>Being heard</span>
     <span><b style="background:var(--red)"></b>Mistake</span>
-    <span><b style="background:var(--green);box-shadow:inset 0 -2px 0 var(--red)"></b>Fixed after correction</span>
+    <span><b style="background:var(--amber);box-shadow:inset 0 -2px 0 var(--red)"></b>Mistake, then corrected</span>
     <span>Tap a word to see what was heard.</span>
   </div>
   <div class="stats" id="stats"></div>
@@ -173,8 +173,9 @@ details.dbg summary{cursor:pointer;color:var(--ink)}
   </div>
 </div></dialog>
 
-<script src="recite.js?v=7"></script>
-<script>window.TASMI_V = "7";</script>
-<script src="app.js?v=7"></script>
+<script src="native.js?v=16"></script>
+<script src="recite.js?v=16"></script>
+<script>window.TASMI_V = "16";</script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

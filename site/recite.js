@@ -9,6 +9,8 @@
     let s = String(w).normalize('NFC').replace(HARAKAT, '')
       .replace(/[ٱأإآ]/g, 'ا').replace(/ى/g, 'ي').replace(/ة/g, 'ه').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ء/g, '')
       .replace(/[^ء-ي]/g, '');
+    // a letter held long (madd: الرحيييم) or a doubled و/ي is the same word; applied to both sides, so it hides no mistake
+    s = s.replace(/([وي])\1+/g, '$1').replace(/(.)\1\1+/g, '$1');
     return s.length > 1 ? s[0] + s.slice(1).replace(/ا/g, '') : s;
   }
   function lev(a, b) {
@@ -22,17 +24,36 @@
     }
     return prev[n];
   }
+  // 2-letter words: only a sounds-alike letter may differ (ق/ك, ع/ا stay strict: قل/كل, عن/إن are real mistakes)
+  const SOUND = ['سصث', 'تط', 'دضظذ', 'ذزظ', 'حه'];
   /** close enough to be the same word (speech recognition spells freely) */
+  const sameCache = new Map();
   function same(h, e) {
+    const key = h + '|' + e; let v = sameCache.get(key);
+    if (v === undefined) { v = same0(h, e); if (sameCache.size > 50000) sameCache.clear(); sameCache.set(key, v); }
+    return v;
+  }
+  function same0(h, e) {
     if (!h || !e) return false;
     if (h === e) return true;
     const L = Math.max(h.length, e.length);
-    if (L <= 2) return false;
+    if (L <= 2) return L === 2 && h.length === 2 && e.length === 2 && lev(h, e) === 1 && SOUND.some(g => [...h].every((c, i) => c === e[i] || (g.includes(c) && g.includes(e[i]))));
     // hamza, ة/ه and long alef are already normalised away, so a real difference is a different word:
     // allow one slipped letter (two only in very long words) — يعلمون for يعملون is a mistake
     return lev(h, e) <= (L >= 10 ? 2 : 1);
   }
-  const words = text => String(text || '').trim().split(/\s+/).map(norm).filter(Boolean);
+  const DIG = { 1: 'واحد', 2: 'اثنين', 3: 'ثلاثة', 4: 'أربعة', 5: 'خمسة', 6: 'ستة', 7: 'سبعة', 8: 'ثمانية', 9: 'تسعة', 10: 'عشرة', 30: 'ثلاثين', 40: 'أربعين', 50: 'خمسين', 60: 'ستين', 70: 'سبعين', 100: 'مائة', 200: 'مائتين', 1000: 'ألف', 2000: 'ألفين' };
+  const FILLER = /^(آ+|ا{2,}|ام{3,}|م{3,}|ء+|[آا]ه+)$/;   // on the raw word: آآ اممم ممم اه — not مم (86:5) or امم (أمم)
+  /** heard text → words: digits as number words, fillers (آآ، امم) dropped, a lone و/ف/ب joined to the next word */
+  function prep(text) {
+    let r = String(text || '').trim().split(/\s+/)
+      .map(w => w.replace(/[٠-٩]/g, d => d.charCodeAt(0) - 0x660)).map(w => /^\d+$/.test(w) ? (DIG[+w] || w) : w)
+      .filter(w => norm(w) && !FILLER.test(w.replace(HARAKAT, '')));
+    const out = [];
+    for (let i = 0; i < r.length; i++) { if (/^[وفب]$/.test(r[i].replace(HARAKAT, '')) && r[i + 1]) { out.push(r[i] + r[i + 1]); i++; } else out.push(r[i]); }
+    return out;
+  }
+  const words = text => prep(text).map(norm);
 
   // surahs whose first word is a group of separate letters (الم، طه، يس...): read as letter names, recognised freely
   const MUQ = new Set([2, 3, 7, 10, 11, 12, 13, 14, 15, 19, 20, 26, 27, 28, 29, 30, 31, 32, 36, 38, 40, 41, 42, 43, 44, 45, 46, 50, 68]);
@@ -43,15 +64,17 @@
     passage.forEach(([ai, k], wi) => {
       const a = S[ai], key = a.i[k];
       const free = k === 0 && ((a.an === 1 && MUQ.has(a.sn)) || (a.sn === 42 && a.an === 2));
-      for (const part of Array.isArray(key) ? key : [key]) out.push({ k: norm(part), wi, free });
+      for (const part of Array.isArray(key) ? key : [key]) out.push({ k: norm(part), r: part, wi, free });
     });
+    // each token joined with the one before it: a recogniser may write two words as one (وماأدراك)
+    out.forEach((t, j) => { if (j) t.k2 = norm(out[j - 1].r + t.r); });
     return out;
   }
-
   /** global alignment of heard words H against expected tokens E (trailing E free: not recited yet) */
   function align(H, E) {
     const N = H.length, K = E.length, W = K + 1;
     const dp = new Float32Array((N + 1) * W), bk = new Int8Array((N + 1) * W);
+    const two = (i, j) => j >= 2 && !E[j - 1].free && !E[j - 2].free && H[i - 1].length >= 4 && !same(H[i - 1], E[j - 1].k) && !same(H[i - 1], E[j - 2].k) && E[j - 1].k2 && same(H[i - 1], E[j - 1].k2);
     const skip = j => (E[j - 1].free ? 0 : 1);
     for (let j = 1; j <= K; j++) { dp[j] = dp[j - 1] - skip(j); bk[j] = 2; }
     for (let i = 1; i <= N; i++) {
@@ -60,6 +83,7 @@
         const m = same(H[i - 1], E[j - 1].k) ? 2 : E[j - 1].free ? -0.3 : -1;
         const d = dp[(i - 1) * W + j - 1] + m, l = dp[i * W + j - 1] - skip(j), u = dp[(i - 1) * W + j] - 0.7;
         let b = 1, v = d; if (l > v) { v = l; b = 2; } if (u > v) { v = u; b = 3; }
+        if (two(i, j)) { const t = dp[(i - 1) * W + j - 2] + 3.5; if (t > v) { v = t; b = 4; } }
         dp[i * W + j] = v; bk[i * W + j] = b;
       }
     }
@@ -69,6 +93,7 @@
     while (i > 0 || j > 0) {
       const b = bk[i * W + j];
       if (b === 1) { ops.push({ t: same(H[i - 1], E[j - 1].k) || E[j - 1].free ? 'ok' : 'wr', h: i - 1, e: j - 1 }); i--; j--; }
+      else if (b === 4) { ops.push({ t: 'ok', h: i - 1, e: j - 1 }); ops.push({ t: 'ok', h: i - 1, e: j - 2 }); i--; j -= 2; }
       else if (b === 2) { ops.push({ t: E[j - 1].free ? 'ok' : 'ms', e: j - 1 }); j--; }
       else { ops.push({ t: 'x', h: i - 1 }); i--; }
     }
@@ -78,10 +103,24 @@
   /** Where in the passage was this heard and how did each word go?
    *  pos: display word the reciter should be at. A recitation may start a few words back (repeating, or starting
    *  the ayah again after a correction) — never ahead, so a skipped word is judged as missing. */
+  /** the reciter said 2–5 words twice in a row ("…فلا تقهر فلا تقهر"): keep one copy, unless the passage itself repeats them */
+  function dropRepeats(T, H, raw) {
+    const keep = H.map(() => true); let ET = null;
+    for (let k = 5; k >= 2; k--) for (let i = k; i + k <= H.length; i++) {
+      let eq = true; for (let x = 0; x < k; x++) if (!keep[i + x] || !keep[i - k + x] || H[i - k + x] !== H[i + x]) { eq = false; break; }
+      if (!eq) continue;
+      const g = H.slice(i, i + k).join(' '); ET = ET || ' ' + T.map(t => t.k).join(' ') + ' ';
+      if (!ET.includes(' ' + g + ' ' + g + ' ')) for (let x = 0; x < k; x++) keep[i + x] = false;
+    }
+    const idx = H.map((_, i) => i).filter(i => keep[i]);            // where each kept word was in what was heard
+    return keep.includes(false) ? { H: H.filter((_, i) => keep[i]), raw: raw.filter((_, i) => keep[i]), idx } : { H, raw, idx };
+  }
+
   function assess(T, passage, pos, heardRaw) {
-    const H = Array.isArray(heardRaw) ? heardRaw : words(heardRaw);
-    const raw = Array.isArray(heardRaw) ? heardRaw : String(heardRaw || '').trim().split(/\s+/).filter(w => norm(w));
+    let H = Array.isArray(heardRaw) ? heardRaw : words(heardRaw);
+    let raw = Array.isArray(heardRaw) ? heardRaw : prep(heardRaw);
     if (!H.length) return null;
+    let idx; ({ H, raw, idx } = dropRepeats(T, H, raw));
     const tokAt = wi => T.findIndex(t => t.wi >= wi);
     pos = Math.max(0, Math.min(pos, passage.length));
     if (pos >= passage.length) return { a: pos, frontier: pos - 1, status: {}, trail: raw, score: -H.length, matched: 0, H, raw };
@@ -96,11 +135,11 @@
       if (!best || sc > best.sc) best = { a, t0, E, r, sc };
     }
     const { a, t0, E, r } = best;
-    const tokSt = {}, heardAt = {};
+    const tokSt = {}, heardAt = {}, hOfTok = {};
     let lastOk = -1;
-    for (const o of r.ops) if (o.e != null) { tokSt[o.e] = o.t; if (o.h != null) heardAt[o.e] = raw[o.h]; if (o.t === 'ok' || o.t === 'wr') lastOk = Math.max(lastOk, o.e); }
+    for (const o of r.ops) if (o.e != null) { tokSt[o.e] = o.t; if (o.h != null) { heardAt[o.e] = raw[o.h]; hOfTok[o.e] = idx[o.h]; } if (o.t === 'ok' || o.t === 'wr') lastOk = Math.max(lastOk, o.e); }
     // per display word: ok if all its spoken words are ok
-    const status = {}, heard = {}; let frontier = a - 1, matched = 0;
+    const status = {}, heard = {}, hOf = {}; let frontier = a - 1, matched = 0;
     for (let e = 0; e <= lastOk; e++) {
       const wi = E[e].wi, st = tokSt[e];
       if (st === 'ok' && !E[e].free) matched++;
@@ -108,33 +147,43 @@
       const prev = status[wi];
       status[wi] = !prev ? st : prev === 'ok' ? st : prev === 'ms' && st === 'ok' ? 'wr' : prev;
       if (heardAt[e]) heard[wi] = (heard[wi] ? heard[wi] + ' ' : '') + heardAt[e];
+      if (hOfTok[e] != null) hOf[wi] = Math.max(hOf[wi] ?? -1, hOfTok[e]);   // the last heard word that matched it
     }
     // heard words after the last matched word (a wrong word at the end, or a repeat)
     const lastOp = r.ops.map(o => o.t !== 'x' && o.t !== 'ms').lastIndexOf(true);
     const trail = r.ops.slice(lastOp + 1).filter(o => o.t === 'x').map(o => ({ k: H[o.h], raw: raw[o.h] }));
-    return { a, frontier, status, heard, trail, score: r.score, matched, H, raw, E, t0 };
+    return { a, pos, frontier, status, heard, hOf, trail, score: r.score, matched, H, raw, E, t0 };
   }
 
   /** What does the muhaffiz do?  final: the recogniser has settled this phrase.
    *  {stop: wi, kind: 'wr'|'ms', heard} to correct the reciter, or {commit: nextPos} to move on, or {none: true}. */
-  function decide(res, passage, T, final) {
+  /** opts.softStart: the phrase began just after the microphone was off for a moment (a restart), so a missing
+   *  first word may simply not have been recorded — not a skip, if the words after it are right */
+  function decide(res, passage, T, final, opts) {
     if (!res) return { none: true };
-    const { a, frontier, status } = res;
-    for (let wi = a; wi <= frontier; wi++) {
+    let soft = null;
+    const { a, frontier, status } = res, from = Math.max(a, res.pos != null ? res.pos : a);
+    // words before pos were already judged: going back over them (repeating, restarting the ayah) never stops on them
+    for (let wi = from; wi <= frontier; wi++) {
       const st = status[wi];
       if (st !== 'wr' && st !== 'ms') continue;
-      // while words are still coming in, only stop once two later words were heard correctly after it
-      if (!final) { let okAfter = 0; for (let x = wi + 1; x <= frontier; x++) if (status[x] === 'ok') okAfter++; if (okAfter < 2) return { none: true }; }
+      if (opts && opts.vetoed && opts.vetoed.has(wi)) continue;      // the Quran model heard this word said right
+      // up to 2 words missing at the very start of the phrase, the next word heard right: lost in the gap
+      if (opts && opts.softStart && st === 'ms' && wi <= from + 1 && (wi === from || status[from] === 'ms' || soft === from)
+          && (status[wi + 1] === 'ok' || (wi === from && status[wi + 1] === 'ms' && status[wi + 2] === 'ok'))) { soft = soft == null ? wi : soft; continue; }
+      // while words are still coming in, only stop once three later words were heard correctly after it
+      // (Chrome rewrites its guesses), and leave a skipped 1–2 letter word (في، ما، من) to the final result
+      if (!final) { let okAfter = 0; for (let x = wi + 1; x <= frontier; x++) if (status[x] === 'ok') okAfter++; if (okAfter < 3 || (st === 'ms' && T.filter(t => t.wi === wi).every(t => t.k.length <= 2))) return { none: true }; }
       return { stop: wi, kind: st, heard: res.heard[wi] || '' };
     }
-    if (final && res.trail.length && frontier + 1 < passage.length && frontier >= a) {
+    if (final && res.trail.length && frontier + 1 < passage.length && frontier >= a && frontier + 1 >= from) {
       // unmatched words at the end: a wrong word — unless they repeat what was just recited
       const recent = T.filter(t => t.wi >= Math.max(0, a - 8) && t.wi <= frontier + 1).map(t => t.k);
       const nextFree = T.some(t => t.wi === frontier + 1 && t.free);
-      if (!nextFree && !res.trail.some(x => recent.some(k => same(x.k, k))))
+      if (!nextFree && !(opts && opts.vetoed && opts.vetoed.has(frontier + 1)) && !res.trail.some(x => recent.some(k => same(x.k, k))))
         return { stop: frontier + 1, kind: 'wr', heard: res.trail.map(x => x.raw).join(' ') };
     }
-    if (final) return frontier >= a ? { commit: frontier + 1 } : { none: true };
+    if (final) return frontier >= a ? (soft != null ? { commit: frontier + 1, soft } : { commit: frontier + 1 }) : { none: true };
     return { none: true };
   }
 
@@ -155,11 +204,57 @@
   function isPreamble(heardRaw) { const n = words(heardRaw).length; const u = preambleLength(heardRaw); return u > 0 && u >= n - 1; }
   /** the heard text without a leading basmala / isti'adha (said in the same breath as the first words) */
   function withoutPreamble(text) {
-    const raw = String(text || '').trim().split(/\s+/).filter(w => norm(w));
+    const raw = prep(text);
     const n = preambleLength(raw.map(norm));
     return n >= 3 ? raw.slice(n).join(' ') : raw.join(' ');
   }
 
-  const API = { norm, same, words, tokens, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
+  /** Second opinion from the Quran model: did it hear passage word `wi` in `text` (its transcript of the last seconds)?
+   *  Local alignment of what it heard against the passage around wi. 'said' — wi was heard, with at least `need` of its
+   *  neighbours matched around it (so the transcript really covers that place); 'not' — the neighbours were heard but
+   *  not wi; 'unknown' — the transcript doesn't cover that place well enough to say. */
+  function confirm(T, wi, text, need = 2) {
+    // read from the end: the shortest last stretch of what it heard that settles the word. The window may also hold
+    // an earlier pass over the same ayah (the reciter went back to repeat) — only the latest pass counts.
+    const all = words(text);
+    for (let k = all.length - 1; k >= 0; k--) {
+      const r = confirmIn(T, wi, all.slice(k), need);
+      if (r.said !== 'unknown') return r;
+    }
+    return { said: 'unknown', ctx: 0 };
+  }
+  function confirmIn(T, wi, H, need) {
+    const lo = T.findIndex(t => t.wi >= wi - 12), hiT = T.findIndex(t => t.wi > wi + 8), E = T.slice(lo, hiT < 0 ? T.length : hiT);
+    if (!H.length || !E.length) return { said: 'unknown', ctx: 0 };
+    const N = H.length, K = E.length, W = K + 1, dp = new Float32Array((N + 1) * W), bk = new Int8Array((N + 1) * W);
+    let best = 0, bi = 0, bj = 0;
+    for (let i = 1; i <= N; i++) for (let j = 1; j <= K; j++) {
+      const m = dp[(i - 1) * W + j - 1] + (same(H[i - 1], E[j - 1].k) || E[j - 1].free ? 2 : -1.5);
+      const l = dp[i * W + j - 1] - (E[j - 1].free ? 0 : 1.2), u = dp[(i - 1) * W + j] - 1;
+      let v = 0, b = 0; if (m > v) { v = m; b = 1; } if (l > v) { v = l; b = 2; } if (u > v) { v = u; b = 3; }
+      dp[i * W + j] = v; bk[i * W + j] = b;
+      if (v > best) { best = v; bi = i; bj = j; }
+    }
+    // walk back the best local alignment: which passage tokens were matched by a heard word
+    const hit = new Set(), seen = new Set(); let i = bi, j = bj;
+    while (i > 0 && j > 0 && bk[i * W + j]) {
+      const b = bk[i * W + j];
+      if (b === 1) { seen.add(E[j - 1].wi); if (same(H[i - 1], E[j - 1].k) || E[j - 1].free) hit.add(j - 1); i--; j--; }
+      else if (b === 2) { seen.add(E[j - 1].wi); j--; } else i--;
+    }
+    const mine = E.map((t, k) => (t.wi === wi ? k : -1)).filter(k => k >= 0);
+    const near = [...new Set(E.filter((t, k) => hit.has(k) && t.wi !== wi && Math.abs(t.wi - wi) <= 4).map(t => t.wi))];
+    const before = near.filter(x => x < wi).length, after = near.filter(x => x > wi).length;
+    // 'said': matched with words on both sides of it (or 2 before it when it is the last word heard, or 2 after it at
+    // the very start of the passage) — one-sided matches can line a different word up by chance
+    const hasBefore = E.some(t => t.wi < wi && !t.free);
+    const anchored = (before >= 1 && after >= 1) || before >= 2 || (!hasBefore && after >= 2);
+    if (mine.length && mine.every(k => hit.has(k)) && near.length >= need && anchored) return { said: 'said', ctx: near.length };
+    // 'not': the place is covered — matched words on both sides of wi (or 2+ before it, when wi is the last word heard)
+    if (seen.has(wi) && ((before >= 1 && after >= 1) || before >= 2)) return { said: 'not', ctx: near.length };
+    return { said: 'unknown', ctx: near.length };
+  }
+
+  const API = { norm, same, words, prep, tokens, confirm, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.Recite = API;
 })(typeof self !== 'undefined' ? self : this);
