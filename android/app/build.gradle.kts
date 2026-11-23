@@ -12,6 +12,8 @@ android {
         targetSdk = 35
         versionCode = buildNo
         versionName = "1.$buildNo"
+        // phones only (the Quran model's ONNX Runtime is big for each CPU type)
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
     signingConfigs {
         create("release") {
@@ -33,9 +35,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     // the same page as the website: site/ is bundled into the app as its assets
-    sourceSets["main"].assets.srcDirs("../../site")
+    // and the Quran model, built by android/model/build_model.py into quran-assets/ (not in git)
+    sourceSets["main"].assets.srcDirs("../../site", "quran-assets")
+    androidResources { noCompress += listOf("onnx") }
 }
 
 dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.32.0")
 }

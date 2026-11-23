@@ -130,6 +130,9 @@ final class Listener {
 
     boolean listening() { return want; }
 
+    /** the last `ms` of the reciter's audio, when the app records the mic itself (STREAM mode); else null */
+    float[] recentAudio(int ms) { return want && mode == STREAM ? mic.recent(ms) : null; }
+
     private void destroy() {
         if (sr != null) {
             try { sr.cancel(); } catch (Exception ignored) { }

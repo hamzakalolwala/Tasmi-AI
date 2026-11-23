@@ -175,3 +175,19 @@ test('just after a microphone restart, 1–2 missing words at the start of the p
   const wrong = [...w]; wrong[0] = 'والكتاب';
   assert.strictEqual(soft(wrong.join(' '), { softStart: true }).stop, s, 'a wrong first word is still wrong');
 });
+
+test('a word the Quran model heard said right is not a mistake (Google misheard it)', () => {
+  const P = passageOf(2, 2, 2), w = spoken(P, 0, P.passage.length).split(' '); w[3] = 'شك';
+  const res = R.assess(P.T, P.passage, 0, w.join(' '));
+  assert.strictEqual(R.decide(res, P.passage, P.T, true).stop, 3);
+  assert.deepStrictEqual(R.decide(res, P.passage, P.T, true, { vetoed: new Set([3]) }), { commit: P.passage.length });
+});
+test('Quran model second opinion: said / not said / can\'t tell', () => {
+  const P = passageOf(2, 2, 3);
+  const right = 'ذَلِكَ الْكِتَابُ لَا رَيْبَ فِيهِ هُدًى لِلْمُتَّقِينَ الَّذِينَ يُؤْمِنُونَ';
+  assert.strictEqual(R.confirm(P.T, 3, right).said, 'said');
+  assert.strictEqual(R.confirm(P.T, 3, right.replace('رَيْبَ', 'شَكَّ')).said, 'not');
+  assert.strictEqual(R.confirm(P.T, 3, right.replace('رَيْبَ ', '')).said, 'not', 'skipped');
+  assert.strictEqual(R.confirm(P.T, 3, 'الَّذِينَ يُؤْمِنُونَ').said, 'unknown', 'the model\'s audio does not reach that word');
+  assert.strictEqual(R.confirm(P.T, 3, '').said, 'unknown');
+});

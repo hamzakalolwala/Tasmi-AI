@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private Listener listener;
+    private Verifier verifier;
     private TextToSpeech tts;
     private boolean ttsReady, ttsArabic, resumed, startWhenResumed, micRefused;
     private String pendingLang;
@@ -64,6 +65,7 @@ public class MainActivity extends Activity {
             }
         });
 
+        verifier = new Verifier(this);
         listener = new Listener(this, new Listener.Events() {
             @Override public void partial(String t) { send("partial", "text", t); }
             @Override public void fin(String t) { send("final", "text", t); }
@@ -117,6 +119,23 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void stopSpeaking() { if (tts != null) tts.stop(); }
         @JavascriptInterface public boolean hasArabicVoice() { return ttsArabic; }
         @JavascriptInterface public boolean ttsReady() { return ttsReady; }
+        /** the Quran model: can it check the last seconds now (model loaded, and the app is recording the mic itself) */
+        @JavascriptInterface public boolean canVerify() { return verifier.ready() && listener.recentAudio(100) != null; }
+        @JavascriptInterface public String modelState() { return verifier.state(); }
+        /** what the Quran model heard in the last `ms` of audio: answered with a "verified" event carrying this id */
+        @JavascriptInterface public boolean verify(String id, int ms) {
+            float[] audio = listener.recentAudio(Math.max(2000, Math.min(15000, ms)));
+            if (audio == null || !verifier.ready()) return false;
+            verifier.transcribe(audio, (text, took, error) -> {
+                try {
+                    JSONObject o = new JSONObject();
+                    o.put("type", "verified"); o.put("id", id); o.put("text", text); o.put("ms", took);
+                    if (error != null) o.put("error", error);
+                    sendJson(o);
+                } catch (Exception ignored) { }
+            });
+            return true;
+        }
         @JavascriptInterface public boolean copy(String text) {
             try {
                 ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -138,6 +157,7 @@ public class MainActivity extends Activity {
         if (!resumed) { startWhenResumed = true; pendingLang = lang; return; }
         keepScreenOn(true);
         listener.start(lang);
+        verifier.prepare();                              // load the Quran model in the background (once)
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
@@ -152,6 +172,10 @@ public class MainActivity extends Activity {
     }
 
     /** an event to native.js */
+    private void sendJson(JSONObject o) {
+        runOnUiThread(() -> web.evaluateJavascript("window.__tasmiNative && window.__tasmiNative.onEvent(" + o + ")", null));
+    }
+
     private void send(String type, String key, String value) {
         runOnUiThread(() -> {
             try {

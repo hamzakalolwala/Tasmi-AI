@@ -19,6 +19,21 @@ jobs:
         with: { node-version: 22 }
       - name: Word engine tests
         run: node --test test/recite.test.js
+      - name: Quran model (cached)
+        id: model
+        uses: actions/cache@v4
+        with:
+          path: android/app/quran-assets
+          key: quran-model-${{ hashFiles('android/model/build_model.py') }}
+      - uses: actions/setup-python@v5
+        if: steps.model.outputs.cache-hit != 'true'
+        with: { python-version: '3.12' }
+      - name: Build the Quran model
+        if: steps.model.outputs.cache-hit != 'true'
+        run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q "optimum[onnxruntime]" transformers
+          python android/model/build_model.py
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4

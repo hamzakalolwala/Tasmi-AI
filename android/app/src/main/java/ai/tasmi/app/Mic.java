@@ -18,7 +18,7 @@ import java.io.OutputStream;
 final class Mic {
     static final int RATE = 16000;                       // 16 kHz mono 16-bit PCM
     private static final int BYTES_PER_MS = RATE * 2 / 1000;
-    private static final int RING = RATE * 2 * 8;        // 8 s of audio
+    private static final int RING = RATE * 2 * 16;       // 16 s of audio (the Quran model checks the last seconds)
     private static final int REPLAY_MS = 3000;           // replay at most this much into a new session
     private static final int OVERLAP_MS = 2500;
 
@@ -76,6 +76,21 @@ final class Mic {
 
     /** ms since the reciter's voice was last loud enough to be speech */
     long quietMs() { return lastLoud == 0 ? Long.MAX_VALUE : SystemClock.elapsedRealtime() - lastLoud; }
+
+    /** the last `ms` of audio as 16 kHz floats (for the Quran model), or null if not recording */
+    float[] recent(int ms) {
+        synchronized (ring) {
+            if (!running || written == 0) return null;
+            long n = Math.min(Math.min((long) ms * BYTES_PER_MS, written), RING - 2) & ~1L;
+            float[] out = new float[(int) (n / 2)];
+            long from = written - n;
+            for (int i = 0; i < out.length; i++) {
+                int lo = ring[(int) ((from + 2L * i) % RING)] & 0xff, hi = ring[(int) ((from + 2L * i + 1) % RING)];
+                out[i] = (short) (lo | (hi << 8)) / 32768f;
+            }
+            return out;
+        }
+    }
 
     /** a pipe for a new recogniser session: the read side goes to the recogniser (EXTRA_AUDIO_SOURCE) */
     ParcelFileDescriptor newSession() throws IOException {

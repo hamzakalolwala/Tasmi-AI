@@ -167,6 +167,7 @@
     for (let wi = from; wi <= frontier; wi++) {
       const st = status[wi];
       if (st !== 'wr' && st !== 'ms') continue;
+      if (opts && opts.vetoed && opts.vetoed.has(wi)) continue;      // the Quran model heard this word said right
       // up to 2 words missing at the very start of the phrase, the next word heard right: lost in the gap
       if (opts && opts.softStart && st === 'ms' && wi <= from + 1 && (wi === from || status[from] === 'ms' || soft === from)
           && (status[wi + 1] === 'ok' || (wi === from && status[wi + 1] === 'ms' && status[wi + 2] === 'ok'))) { soft = soft == null ? wi : soft; continue; }
@@ -179,7 +180,7 @@
       // unmatched words at the end: a wrong word — unless they repeat what was just recited
       const recent = T.filter(t => t.wi >= Math.max(0, a - 8) && t.wi <= frontier + 1).map(t => t.k);
       const nextFree = T.some(t => t.wi === frontier + 1 && t.free);
-      if (!nextFree && !res.trail.some(x => recent.some(k => same(x.k, k))))
+      if (!nextFree && !(opts && opts.vetoed && opts.vetoed.has(frontier + 1)) && !res.trail.some(x => recent.some(k => same(x.k, k))))
         return { stop: frontier + 1, kind: 'wr', heard: res.trail.map(x => x.raw).join(' ') };
     }
     if (final) return frontier >= a ? (soft != null ? { commit: frontier + 1, soft } : { commit: frontier + 1 }) : { none: true };
@@ -208,6 +209,39 @@
     return n >= 3 ? raw.slice(n).join(' ') : raw.join(' ');
   }
 
-  const API = { norm, same, words, prep, tokens, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
+  /** Second opinion from the Quran model: did it hear passage word `wi` in `text` (its transcript of the last seconds)?
+   *  Local alignment of what it heard against the passage around wi. 'said' — wi was heard, with at least `need` of its
+   *  neighbours matched around it (so the transcript really covers that place); 'not' — the neighbours were heard but
+   *  not wi; 'unknown' — the transcript doesn't cover that place well enough to say. */
+  function confirm(T, wi, text, need = 2) {
+    const H = words(text);
+    const lo = T.findIndex(t => t.wi >= wi - 12), hiT = T.findIndex(t => t.wi > wi + 8), E = T.slice(lo, hiT < 0 ? T.length : hiT);
+    if (!H.length || !E.length) return { said: 'unknown', ctx: 0 };
+    const N = H.length, K = E.length, W = K + 1, dp = new Float32Array((N + 1) * W), bk = new Int8Array((N + 1) * W);
+    let best = 0, bi = 0, bj = 0;
+    for (let i = 1; i <= N; i++) for (let j = 1; j <= K; j++) {
+      const m = dp[(i - 1) * W + j - 1] + (same(H[i - 1], E[j - 1].k) || E[j - 1].free ? 2 : -1.5);
+      const l = dp[i * W + j - 1] - (E[j - 1].free ? 0 : 1.2), u = dp[(i - 1) * W + j] - 1;
+      let v = 0, b = 0; if (m > v) { v = m; b = 1; } if (l > v) { v = l; b = 2; } if (u > v) { v = u; b = 3; }
+      dp[i * W + j] = v; bk[i * W + j] = b;
+      if (v > best) { best = v; bi = i; bj = j; }
+    }
+    // walk back the best local alignment: which passage tokens were matched by a heard word
+    const hit = new Set(), seen = new Set(); let i = bi, j = bj;
+    while (i > 0 && j > 0 && bk[i * W + j]) {
+      const b = bk[i * W + j];
+      if (b === 1) { seen.add(E[j - 1].wi); if (same(H[i - 1], E[j - 1].k) || E[j - 1].free) hit.add(j - 1); i--; j--; }
+      else if (b === 2) { seen.add(E[j - 1].wi); j--; } else i--;
+    }
+    const mine = E.map((t, k) => (t.wi === wi ? k : -1)).filter(k => k >= 0);
+    const near = [...new Set(E.filter((t, k) => hit.has(k) && t.wi !== wi && Math.abs(t.wi - wi) <= 4).map(t => t.wi))];
+    const before = near.filter(x => x < wi).length, after = near.filter(x => x > wi).length;
+    if (mine.length && mine.every(k => hit.has(k)) && near.length >= need) return { said: 'said', ctx: near.length };
+    // 'not': the place is covered — matched words on both sides of wi (or 2+ before it, when wi is the last word heard)
+    if (seen.has(wi) && ((before >= 1 && after >= 1) || before >= 2)) return { said: 'not', ctx: near.length };
+    return { said: 'unknown', ctx: near.length };
+  }
+
+  const API = { norm, same, words, prep, tokens, confirm, align, assess, decide, isPreamble, preambleLength, withoutPreamble, lev };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.Recite = API;
 })(typeof self !== 'undefined' ? self : this);

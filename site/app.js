@@ -115,7 +115,9 @@
   }
   function reset() {
     W = passage.map(() => ({ st: 'p', everWrong: false, heard: '' }));
-    pos = 0; selfPtr = 0; hints = new Set(); heardFinal = ''; interim = ''; dropN = 0; live = null; hideStop(); render();
+    pos = 0; selfPtr = 0; hints = new Set(); heardFinal = ''; interim = ''; dropN = 0; live = null; hideStop();
+    if (typeof verdicts !== 'undefined') { verdicts.clear(); if (verifying) clearTimeout(verifying.timer); verifying = null; }
+    render();
   }
 
   // ---------- the listener: the browser's speech recognition, restarted after every phrase ----------
@@ -205,7 +207,10 @@
   }
   const QUIET = TEST && params.has('quiet') ? +params.get('quiet') : 40000;   // ms of silence before listening pauses
   let gapAt = 0, phraseAt = 0, phrasePos = -1;   // when and where (in the passage) the current phrase began
-  window.__tasmiMode = (m, why) => addLog({ heard: '', result: `listening mode: ${m} (${why})` });
+  window.__tasmiMode = (m, why) => {
+    let model = ''; try { model = window.TasmiNative && TasmiNative.modelState ? `; Quran model: ${TasmiNative.modelState()}` : ''; } catch (e) {}
+    addLog({ heard: '', result: `listening mode: ${m} (${why})${model}` });
+  };
   let L = null, wantListen = false, sayToken = 0, wake = null, hiddenWhileListening = false;
   const NOTES = {
     not_granted: 'Chrome blocked the microphone. Tap the lock icon next to the address, allow Microphone, then tap <b>Continue</b>.',
@@ -292,14 +297,15 @@
     // corrected: skipping it again is a real skip)
     const g = L ? L.gapAt : 0, softStart = !!(g && phraseAt && phraseAt >= g && phraseAt - g < 2500) && pos === phrasePos
       && !(W[pos] && W[pos].everWrong);
-    const d = Recite.decide(res, passage, T, final, { softStart });
+    const vetoed = new Set([...verdicts].filter(([wi, v]) => v === 'said' && wi >= pos).map(([wi]) => wi));
+    const d = Recite.decide(res, passage, T, final, { softStart, vetoed });
     live = res && res.frontier >= res.a ? res : null;
     if (d.stop != null) {
       // Chrome rewrites its interim guesses: stop on an interim result only once the same mistake has held for a moment
-      if (final) { pending = null; return correct(res, d, text); }
+      if (final) { pending = null; return stopOrVerify(res, d, text, true); }
       const key = d.stop + '|' + d.kind + '|' + d.heard, now = Date.now();
       if (!pending || pending.key !== key) { pending = { key, since: now }; clearTimeout(pendingT); pendingT = setTimeout(() => { if (pending && pending.key === key && interim && !muted) think(false); }, HOLD + 30); }
-      else if (now - pending.since >= HOLD) { pending = null; return correct(res, d, text); }
+      else if (now - pending.since >= HOLD) { pending = null; return stopOrVerify(res, d, text, false); }
     } else if (!final) {
       pending = null;
       // confirm the words that are clearly done: right, with 4 more right words after them
@@ -313,11 +319,13 @@
       }
     }
     if (final) pending = null;
+    if (final && verifying) { verifying.final = true; render(); return; }   // keep the phrase until the model answers
     if (final) {
       const entry = { heard: text, at: res ? `${res.a + 1}–${res.frontier + 1}` : '' };
       if (d.commit != null) {
         for (let i = pos; i < d.commit; i++) mark(i, 'ok');   // only new words: earlier ones keep what they were
         if (d.soft != null) entry.note = `${wordName(d.soft)} not heard just after a mic restart — not counted as skipped`;
+        for (const wi of [...verdicts.keys()]) if (wi < d.commit) { if (verdicts.get(wi) === 'said') entry.note = (entry.note ? entry.note + '; ' : '') + `${wordName(wi)}: Quran model heard it right (Google misheard)`; verdicts.delete(wi); }
         pos = Math.max(pos, d.commit); entry.result = 'ok → ' + (pos < passage.length ? wordName(pos) : 'end');
         hideStop();
         if (pos >= passage.length) toastNote('MashaAllah, you reached the end. Tap <b>Finish</b> for your result, or <b>Next</b> for the next part.');
@@ -332,6 +340,44 @@
     if (st === 'ok') W[i] = { ...w, st: w.everWrong ? 'fixed' : 'ok' };
     else W[i] = { st, everWrong: true, heard: heard || w.heard };
   }
+
+  // ---------- the Quran model's second opinion (Android app) ----------
+  // Before stopping, the app asks the Quran model on the phone what it heard in the last seconds. If it heard the
+  // word said right, Google misheard: no stop. If it heard something else, or can't tell, the stop goes ahead.
+  const verdicts = new Map();          // word index → 'said' | 'not' | 'unknown' (until the reciter is past it)
+  let verifying = null, verifySeq = 0;
+  const canVerify = () => { try { return !!(window.TasmiNative && TasmiNative.canVerify && TasmiNative.canVerify()); } catch (e) { return false; } };
+  function stopOrVerify(res, d, text, final) {
+    const v = verdicts.get(d.stop);
+    if (v === 'said') return render();                       // (decide already skips it; just in case)
+    if (v || !canVerify()) return correct(res, d, text);
+    if (verifying) { verifying.final = verifying.final || final; return; }   // already asking about this phrase
+    const id = 'v' + (++verifySeq);
+    verifying = { id, wi: d.stop, kind: d.kind, heard: d.heard, final, at: Date.now() };
+    let asked = false;
+    try { asked = TasmiNative.verify(id, 10000); } catch (e) { asked = false; }
+    if (!asked) { verifying = null; return correct(res, d, text); }
+    verifying.timer = setTimeout(() => answer({ id, text: '', error: 'too slow' }), VERIFY_MS);
+  }
+  function answer(ev) {
+    const v = verifying;
+    if (!v || ev.id !== v.id) return;
+    clearTimeout(v.timer); verifying = null;
+    const c = ev.error ? { said: 'unknown' } : Recite.confirm(T, v.wi, ev.text);
+    verdicts.set(v.wi, c.said);
+    addLog({ heard: ev.text || '', result: `Quran model on ${wordName(v.wi)}: ${c.said === 'said' ? 'heard it said right — not stopped' : c.said === 'not' ? 'did not hear it — stop' : "can't tell — stop"}`
+      + ` (${ev.ms != null ? ev.ms + ' ms' : ''}${ev.error ? ', ' + ev.error : ''}; Google heard ${v.kind === 'ms' ? 'nothing' : v.heard || '?'})` });
+    if (muted || !wantListen) return;
+    // judge again with the answer: a word the model heard is fine, anything else stops now (no more waiting)
+    const final = v.final && !!heardFinal.trim();
+    if (heardFinal.trim() || interim) think(final);
+    if (c.said !== 'said' && !stop && W[v.wi] && W[v.wi].st === 'p' && pos <= v.wi) {
+      // the phrase moved on meanwhile and the mistake isn't in what is heard now: stop on it anyway
+      correct({ a: pos, frontier: v.wi }, { stop: v.wi, kind: v.kind, heard: v.heard }, '');
+    }
+  }
+  window.__tasmiVerified = answer;
+  const VERIFY_MS = TEST && params.has('verifyms') ? +params.get('verifyms') : 3000;
 
   // ---------- the muhaffiz stops you and says the right word ----------
   function correct(res, d, text) {

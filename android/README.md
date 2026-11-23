@@ -17,6 +17,9 @@ recognition and Arabic text-to-speech instead of Chrome's:
 - `site/native.js` makes the bridge look like the browser's `SpeechRecognition` / `speechSynthesis`, so `app.js`
   runs unchanged (one continuous session). Tested in `test/sim.test.js` ("Android app" tests).
 
+- The Quran model (`QuranModel.java`, `Verifier.java`, `model/`): a second opinion before every stop — see
+  model/README.md.
+
 ## Build
 GitHub Actions (`.github/workflows/android.yml`) builds on every push that touches `site/` or `android/` and
 publishes `TasmiAI.apk` to the `app` release:

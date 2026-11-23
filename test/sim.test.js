@@ -211,7 +211,10 @@ const NATIVE = () => {
     startListening() { n.starts++; n.on = true; },
     stopListening() { n.stops++; n.on = false; },
     speak(text, rate, id) { n.spoken.push(text); setTimeout(() => ev({ type: 'ttsDone', id }), 50); return true; },
-    stopSpeaking() {}, hasArabicVoice() { return true; }, copy() { return true; },
+    stopSpeaking() {}, hasArabicVoice() { return true; }, copy() { return true; }, ttsReady() { return true; },
+    // the Quran model: n.model() is what it hears in the last seconds (unset = no model on this phone)
+    canVerify() { return !!n.model; }, modelState() { return n.model ? 'ready' : 'missing'; },
+    verify(id) { n.asked = (n.asked || 0) + 1; if (n.model) setTimeout(() => ev({ type: 'verified', id, text: n.model(), ms: 300 }), n.modelDelay || 300); return !!n.model; },
   };
   const wait = ms => new Promise(r => setTimeout(r, ms));
   /** Android: partial results word by word, a final at each pause; the app's Listener restarts by itself in between */
@@ -371,6 +374,55 @@ test('Android app, one phrase for a whole page: progress moves while reciting, e
     assert.ok(r.maxWords < 45, `each check looked at ${r.maxWords} words (of ${r.total})`);
     if (withMistake) assert.deepStrictEqual([r.spoken, r.stop], [1, r.bad]);
     else assert.deepStrictEqual([r.spoken, r.pos], [0, r.n]);
+    await p.close();
+  }
+});
+
+// ---------- the Quran model's second opinion ----------
+test('Android app + Quran model: Google mishears a word the reciter said right → the model saves it, no stop', async () => {
+  const p = await openNative({ unit: 'range', surah: 2, from: 2, to: 5 });
+  const r = await p.evaluate(async () => {
+    delete window.__spoken;
+    const ph = phrasesOf(0, __app.passage.length), google = ph.map(x => [...x]); google[0][3] = 'شك';   // Google: لا شك
+    __native.model = () => ph[0].join(' ');                       // the Quran model heard: لا ريب
+    await nativeRecite(google);
+    await new Promise(r => setTimeout(r, 600));
+    return { spoken: __native.spoken.length, asked: __native.asked, pos: __app.pos, n: __app.passage.length, st3: __app.W[3].st,
+      log: __log.map(e => e.result + (e.note ? ' / ' + e.note : '')).join(' | ') };
+  });
+  assert.deepStrictEqual(p.errs, []);
+  assert.strictEqual(r.spoken, 0, 'not stopped: ' + r.log);
+  assert.strictEqual(r.asked, 1);
+  assert.strictEqual(r.st3, 'ok');
+  assert.strictEqual(r.pos, r.n);
+  assert.match(r.log, /heard it said right/);
+  await p.close();
+});
+test('Android app + Quran model: a real mistake — the model hears it too → stop on it', async () => {
+  const p = await openNative({ unit: 'range', surah: 2, from: 2, to: 5 });
+  const r = await p.evaluate(async () => {
+    delete window.__spoken;
+    const ph = phrasesOf(0, __app.passage.length), said = ph.map(x => [...x]); said[0][3] = 'شك';
+    __native.model = () => said[0].join(' ');                     // the reciter really said شك
+    await nativeRecite([said[0]]);
+    await new Promise(r => setTimeout(r, 800));
+    return { spoken: __native.spoken.length, stop: __app.stop && __app.stop.i, st3: __app.W[3].st };
+  });
+  assert.deepStrictEqual(r, { spoken: 1, stop: 3, st3: 'wr' });
+  await p.close();
+});
+test('Android app + Quran model: the model too slow, or not on the phone → the stop goes ahead', async () => {
+  for (const setup of ['slow', 'none']) {
+    const p = await openNative({ unit: 'range', surah: 2, from: 2, to: 5 });
+    const r = await p.evaluate(async setup => {
+      delete window.__spoken;
+      const ph = phrasesOf(0, __app.passage.length), google = ph.map(x => [...x]); google[0][3] = 'شك';
+      if (setup === 'slow') { __native.model = () => ph[0].join(' '); __native.modelDelay = 6000; }
+      await nativeRecite([google[0]]);
+      await new Promise(r => setTimeout(r, setup === 'slow' ? 3500 : 300));
+      return { spoken: __native.spoken.length, stop: __app.stop && __app.stop.i };
+    }, setup);
+    assert.deepStrictEqual(r, { spoken: 1, stop: 3 }, setup);
     await p.close();
   }
 });
