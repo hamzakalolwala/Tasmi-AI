@@ -191,3 +191,10 @@ test('Quran model second opinion: said / not said / can\'t tell', () => {
   assert.strictEqual(R.confirm(P.T, 3, 'الَّذِينَ يُؤْمِنُونَ').said, 'unknown', 'the model\'s audio does not reach that word');
   assert.strictEqual(R.confirm(P.T, 3, '').said, 'unknown');
 });
+
+test('Quran model: a word skipped after going back to repeat is still a skip (only the latest pass counts)', () => {
+  const P = passageOf(1, 1, 7), wi = P.passage.findIndex(([ai, k]) => P.S[ai].an === 5 && k === 2);   // وإياك
+  const t = 'إياك نعبد وإياك نستعين اهدنا الصراط المستقيم إياك نعبد نستعين اهدنا الصراط';
+  assert.strictEqual(R.confirm(P.T, wi, t).said, 'not');
+  assert.strictEqual(R.confirm(P.T, wi, 'إياك نعبد وإياك نستعين اهدنا الصراط').said, 'said');
+});

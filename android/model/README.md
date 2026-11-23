@@ -17,13 +17,15 @@ encoder 11.7 MB, decoder 49.8 MB, decoder-with-past 48.6 MB (int8 matrix weights
 ## Measured (on a computer; a phone is ~2–3× slower)
 - `QuranModel.java` gives the same text as the Python reference on all 8 test clips (log-mel max diff 2e-5).
 - 0.4–1.0 s for 12 s of audio (int8, 4 threads).
-- 72 clips (6 EveryAyah reciters × 12 random ayat), words inside the audio window:
+- 72 clips (6 EveryAyah reciters × 12 random ayat), words at least 1.5 s into the audio window (in the app the word
+  is always several seconds in: the stop comes 2–3 s after it). `confirm` needs matched words on both sides of the word
+  and reads the transcript from its end (only the latest pass counts when the reciter went back to repeat):
 
 | audio | right words confirmed (false stop cancelled) | real wrong word wrongly cancelled | real skip wrongly cancelled |
 |---|---|---|---|
-| clean | 92.6% | 0.4% | 1.0% |
-| quiet room (28 dB SNR, phone band, cut mid-word) | 87.1% | 0.0% | 1.9% |
-| noisy phone (15 dB SNR) | 83.6% | 0.2% | 0.7% |
+| clean | 92.8% | 0.0% | 1.4% |
+| quiet room (28 dB SNR, phone band, cut mid-word) | 84.6% | 0.0% | 0.3% |
+| noisy phone (15 dB SNR) | 80.6% | 0.3% | 0.8% |
 
 whisper-base-ar-quran was 87.4% / 90.8% in room / noisy, but twice the size and 1.5× slower.
 EveryAyah reciters may be in Tarteel's training data; Hamza's own voice is the real test (the log says what the

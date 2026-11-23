@@ -126,7 +126,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface public boolean verify(String id, int ms) {
             float[] audio = listener.recentAudio(Math.max(2000, Math.min(15000, ms)));
             if (audio == null || !verifier.ready()) return false;
-            verifier.transcribe(audio, (text, took, error) -> {
+            return verifier.transcribe(audio, (text, took, error) -> {
                 try {
                     JSONObject o = new JSONObject();
                     o.put("type", "verified"); o.put("id", id); o.put("text", text); o.put("ms", took);
@@ -134,7 +134,6 @@ public class MainActivity extends Activity {
                     sendJson(o);
                 } catch (Exception ignored) { }
             });
-            return true;
         }
         @JavascriptInterface public boolean copy(String text) {
             try {
@@ -213,6 +212,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         listener.stop();
+        verifier.close();
         if (tts != null) { tts.stop(); tts.shutdown(); }
         web.destroy();
         super.onDestroy();

@@ -250,13 +250,14 @@
         setMain(); status();
       });
     }
-    note(''); heardFinal = ''; interim = ''; dropN = 0;
+    note(''); heardFinal = ''; interim = ''; dropN = 0; forgetVerdicts(pos);
     wantListen = true;
     if (L.start() === false) { wantListen = false; note(NOTES.error, true); }
     else { listening = true; keepAwake(true); }
     setMain(); render(); status();
   }
   function stopListening() {
+    forgetVerdicts(pos);
     wantListen = false; listening = false; sayToken++; muted = false; pending = null; clearTimeout(pendingT);
     if (L) L.stop(); keepAwake(false);
     live = null; interim = ''; setMain(); render(); status();
@@ -264,7 +265,7 @@
   // screen off / tab hidden: Chrome stops the microphone; carry on by itself when the page is back
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
-      if (wantListen && mode === 'mic') { hiddenWhileListening = true; sayToken++; muted = false; interim = ''; pending = null; clearTimeout(pendingT); if (L) L.stop(); listening = false; wake = null; }
+      if (wantListen && mode === 'mic') { hiddenWhileListening = true; forgetVerdicts(pos); sayToken++; muted = false; interim = ''; pending = null; clearTimeout(pendingT); if (L) L.stop(); listening = false; wake = null; }
     } else if (hiddenWhileListening) {
       hiddenWhileListening = false;
       if (mode === 'mic' && !$('sumDlg').open) startListening();
@@ -371,7 +372,7 @@
     // judge again with the answer: a word the model heard is fine, anything else stops now (no more waiting)
     const final = v.final && !!heardFinal.trim();
     if (heardFinal.trim() || interim) think(final);
-    if (c.said !== 'said' && !stop && W[v.wi] && W[v.wi].st === 'p' && pos <= v.wi) {
+    if (c.said !== 'said' && !stop && !verifying && W[v.wi] && W[v.wi].st === 'p' && pos <= v.wi) {
       // the phrase moved on meanwhile and the mistake isn't in what is heard now: stop on it anyway
       correct({ a: pos, frontier: v.wi }, { stop: v.wi, kind: v.kind, heard: v.heard }, '');
     }
@@ -380,7 +381,13 @@
   const VERIFY_MS = TEST && params.has('verifyms') ? +params.get('verifyms') : 3000;
 
   // ---------- the muhaffiz stops you and says the right word ----------
+  /** forget the Quran model's answers from here on, and any question still out (a stop, a new start, a correction) */
+  function forgetVerdicts(from) {
+    for (const wi of [...verdicts.keys()]) if (wi >= from) verdicts.delete(wi);
+    if (verifying) { clearTimeout(verifying.timer); verifying = null; }
+  }
   function correct(res, d, text) {
+    forgetVerdicts(d.stop);
     for (let i = pos; i < d.stop; i++) mark(i, 'ok');
     mark(d.stop, d.kind === 'ms' ? 'ms' : 'wr', d.heard);
     pos = d.stop; heardFinal = ''; interim = ''; live = null; dropN = 0;

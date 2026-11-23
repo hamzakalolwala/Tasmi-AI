@@ -214,7 +214,16 @@
    *  neighbours matched around it (so the transcript really covers that place); 'not' — the neighbours were heard but
    *  not wi; 'unknown' — the transcript doesn't cover that place well enough to say. */
   function confirm(T, wi, text, need = 2) {
-    const H = words(text);
+    // read from the end: the shortest last stretch of what it heard that settles the word. The window may also hold
+    // an earlier pass over the same ayah (the reciter went back to repeat) — only the latest pass counts.
+    const all = words(text);
+    for (let k = all.length - 1; k >= 0; k--) {
+      const r = confirmIn(T, wi, all.slice(k), need);
+      if (r.said !== 'unknown') return r;
+    }
+    return { said: 'unknown', ctx: 0 };
+  }
+  function confirmIn(T, wi, H, need) {
     const lo = T.findIndex(t => t.wi >= wi - 12), hiT = T.findIndex(t => t.wi > wi + 8), E = T.slice(lo, hiT < 0 ? T.length : hiT);
     if (!H.length || !E.length) return { said: 'unknown', ctx: 0 };
     const N = H.length, K = E.length, W = K + 1, dp = new Float32Array((N + 1) * W), bk = new Int8Array((N + 1) * W);
@@ -236,7 +245,11 @@
     const mine = E.map((t, k) => (t.wi === wi ? k : -1)).filter(k => k >= 0);
     const near = [...new Set(E.filter((t, k) => hit.has(k) && t.wi !== wi && Math.abs(t.wi - wi) <= 4).map(t => t.wi))];
     const before = near.filter(x => x < wi).length, after = near.filter(x => x > wi).length;
-    if (mine.length && mine.every(k => hit.has(k)) && near.length >= need) return { said: 'said', ctx: near.length };
+    // 'said': matched with words on both sides of it (or 2 before it when it is the last word heard, or 2 after it at
+    // the very start of the passage) — one-sided matches can line a different word up by chance
+    const hasBefore = E.some(t => t.wi < wi && !t.free);
+    const anchored = (before >= 1 && after >= 1) || before >= 2 || (!hasBefore && after >= 2);
+    if (mine.length && mine.every(k => hit.has(k)) && near.length >= need && anchored) return { said: 'said', ctx: near.length };
     // 'not': the place is covered — matched words on both sides of wi (or 2+ before it, when wi is the last word heard)
     if (seen.has(wi) && ((before >= 1 && after >= 1) || before >= 2)) return { said: 'not', ctx: near.length };
     return { said: 'unknown', ctx: near.length };

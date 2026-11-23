@@ -25,6 +25,7 @@ final class Verifier {
     private volatile QuranModel model;
     private volatile String state = "not loaded";       // for the log: not loaded / loading / ready / missing / failed: …
     private boolean started;
+    private final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean();
 
     Verifier(Context ctx) { this.ctx = ctx.getApplicationContext(); }
 
@@ -34,7 +35,8 @@ final class Verifier {
         catch (Exception e) { return false; }
     }
 
-    boolean ready() { return model != null; }
+    /** loaded, and not still working on an earlier question (a slow phone: then the page stops at once instead) */
+    boolean ready() { return model != null && !busy.get(); }
     String state() { return state; }
 
     /** load it in the background (once) */
@@ -56,14 +58,29 @@ final class Verifier {
     }
 
     /** what the model hears in this audio; the answer comes on the model's thread */
-    void transcribe(float[] audio, Done done) {
+    boolean transcribe(float[] audio, Done done) {
+        if (!busy.compareAndSet(false, true)) return false;          // one question at a time, never a queue
+        try {
+            worker.execute(() -> {
+                QuranModel m = model;
+                long t0 = SystemClock.elapsedRealtime();
+                try {
+                    if (m == null) done.text("", 0, state);
+                    else done.text(m.transcribe(audio), SystemClock.elapsedRealtime() - t0, null);
+                } catch (Throwable e) { done.text("", SystemClock.elapsedRealtime() - t0, e.toString()); }
+                finally { busy.set(false); }
+            });
+            return true;
+        } catch (Exception e) { busy.set(false); return false; }
+    }
+
+    /** the app is closing: free the model (~110 MB) */
+    void close() {
         worker.execute(() -> {
-            QuranModel m = model;
-            if (m == null) { done.text("", 0, state); return; }
-            long t0 = SystemClock.elapsedRealtime();
-            try { done.text(m.transcribe(audio), SystemClock.elapsedRealtime() - t0, null); }
-            catch (Throwable e) { done.text("", SystemClock.elapsedRealtime() - t0, e.toString()); }
+            QuranModel m = model; model = null;
+            if (m != null) { try { m.close(); } catch (Exception ignored) { } }
         });
+        worker.shutdown();
     }
 
     /** copy the model out of the APK into the app's files (once per app version) */
